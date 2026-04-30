@@ -13,7 +13,7 @@ class Step3_TemperatureDependence(ttk.Frame):
         
         self.temp_data = [] 
         self.extracted_physics = [] 
-        self.Tc_estimate = None # 动态记录能隙闭合温度
+        self.Tc_estimate = None
 
         self.show_mode = tk.StringVar(value="RSS Comparison vs T")
         
@@ -216,12 +216,12 @@ class Step3_TemperatureDependence(ttk.Frame):
             kF_val = item['kF']
             k_vals, p_vals = item['k_vals'], item['p_vals']
             
-            # Determine Target k (优先使用真实的 kF)
+            # Determine Target k 
             if k_ref_str.lower() == 'kf':
                 if kF_val is not None:
                     k_target = kF_val
                 else:
-                    k_target = k_vals[len(k_vals) // 2] # Fallback 旧版逻辑
+                    k_target = k_vals[len(k_vals) // 2] 
             else:
                 k_target = float(k_ref_str)
                 
@@ -239,7 +239,7 @@ class Step3_TemperatureDependence(ttk.Frame):
                 self.Tc_estimate = T
                 gap_closed = True
                 
-            # 2. Dynamic Weighted Method (基于误差倍数的左右拓展搜索)
+            # 2. Dynamic Weighted Method 
             # --- For Delta ---
             lb_d = sp_delta - err_mult * sp_err
             ub_d = sp_delta + err_mult * sp_err
@@ -294,7 +294,6 @@ class Step3_TemperatureDependence(ttk.Frame):
         
         ax = self.fig.add_subplot(111)
         
-        # 1. 绘制独立的 RSS 比较图
         if mode == "RSS Comparison vs T":
             rss_g = [p['rss_gap_mean'] for p in self.extracted_physics]
             rss_m = [p['rss_met_mean'] for p in self.extracted_physics]
@@ -310,7 +309,6 @@ class Step3_TemperatureDependence(ttk.Frame):
             ax.legend(loc='best', fontsize=12)
             self._set_scientific_style(ax)
 
-        # 2. 绘制独立的 P-value 图
         elif mode == "P-value vs T":
             p_vals = [p['sp_p_val'] for p in self.extracted_physics]
             log_p = np.log10(np.clip(p_vals, 1e-15, 1))
@@ -330,7 +328,6 @@ class Step3_TemperatureDependence(ttk.Frame):
             ax.legend(loc='best', fontsize=12)
             self._set_scientific_style(ax)
             
-        # 3. 绘制 SC Gap 图
         elif mode == "SC Gap (Delta) vs T":
             sp_d = np.array([p['sp_delta'] for p in self.extracted_physics]) * 1000
             sp_e = np.array([p['sp_err'] for p in self.extracted_physics]) * 1000
@@ -359,7 +356,6 @@ class Step3_TemperatureDependence(ttk.Frame):
             except: ymax = None
             ax.set_ylim(bottom=ymin, top=ymax)
 
-        # 4. 绘制 Gamma 图
         elif mode == "Gamma vs T":
             sp_g = np.array([p['sp_gamma'] for p in self.extracted_physics]) * 1000
             sp_ge = np.array([p['sp_g_err'] for p in self.extracted_physics]) * 1000

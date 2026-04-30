@@ -699,7 +699,7 @@ class Step1_BandExtraction(ttk.Frame):
             
             pad_I = (np.max(I_sorted) - np.min(I_sorted)) * 0.1
             ax.set_xlim(np.min(E_sorted), np.max(E_sorted))
-            ax.set_ylim(np.min(I_sorted) - pad_I, np.max(I_sorted) + pad_I)
+            ax.set_ylim(0, np.max(I_sorted) + pad_I)
             
             # [FIX 2]: Legend perfectly mapped to the empty right side created by subplots_adjust
             ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left", fontsize=10, frameon=True, edgecolor='black')

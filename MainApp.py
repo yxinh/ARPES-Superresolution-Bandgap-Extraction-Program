@@ -15,7 +15,7 @@ class MainApp:
 
         # Tab 1: Band Extraction
         self.step1_module = Step1_BandExtraction(self.notebook, controller=self)
-        self.notebook.add(self.step1_module, text=" Step 1: Preprocessing & Extraction ")
+        self.notebook.add(self.step1_module, text=" Step 1: Band Structure Extraction ")
 
         # Tab 2: SC Gap Fitting
         self.step2_module = Step2_GapFitting(self.notebook, controller=self)
