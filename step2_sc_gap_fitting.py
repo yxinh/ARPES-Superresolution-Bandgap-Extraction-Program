@@ -931,7 +931,7 @@ class Step2_GapFitting(ttk.Frame):
             
             n_points = len(self.fit_e_vals)
             f_stats = np.maximum(((RSS_met - RSS_gap) / 1) / (RSS_gap / (n_points - 3)), 0)
-            p_vals = 1 - stats.f.cdf(f_stats, 1, n_points - 3)
+            p_vals = stats.f.sf(f_stats, 1, n_points - 3)
             
             self.final_stats = {
                 'delta_fit': delta_fit, 'delta_err': delta_err,
@@ -1297,20 +1297,27 @@ class Step2_GapFitting(ttk.Frame):
             if not line_fit_gap: return
             idx = current_idx[0]
             data_g = self.fit_results_gap[idx]
+            data_m = self.fit_results_metal[idx]
             edc_k = self.fit_k_points[idx]
             
             popt_new = [v.get() for v in param_vars]
             
             spline_func = self.controller.step1_module.spline_func
             y_fit_new = self.calc_spectrum(data_g['x'], popt_new[0], popt_new[1], popt_new[2], edc_k, spline_func)
-                             
-            res_new = np.mean(((data_g['y_data'] - y_fit_new) / data_g['sigma'])**2)
-            res_var.set(f"Reduced Chi-Sq (Gap): {res_new:.4e}")
             
             data_g['popt'] = popt_new
             data_g['y_fit'] = y_fit_new
             
             line_fit_gap[0].set_ydata(y_fit_new)
+            
+            N = len(data_g['y_data'])
+            P_gap = len(popt_new)
+            P_met = P_gap - 1
+            
+            chi2_gap_new = np.sum(((data_g['y_data'] - y_fit_new) / data_g['sigma'])**2) / (N - P_gap)
+            chi2_met = np.sum(((data_g['y_data'] - data_m['y_fit']) / data_g['sigma'])**2) / (N - P_met)
+            res_var.set(f"Reduced Chi-Sq (Gap): {chi2_gap_new:.4f}   |   (Metal): {chi2_met:.4f}")
+            
             canvas.draw_idle()
 
         def build_sliders(popt, names, orig_popt):
@@ -1367,8 +1374,12 @@ class Step2_GapFitting(ttk.Frame):
             ax.set_ylabel("ARPES Intensity (a.u.)", fontsize=14)
             ax.set_title(fr"Dual Model Fit Comparison | k = {edc_k:.4f} $\mathrm{{\AA}}^{{-1}}$", fontsize=14)
             
-            res_val = np.mean(((data_g['y_data'] - data_g['y_fit']) / data_g['sigma'])**2)
-            res_var.set(f"Reduced Chi-Sq (Gap): {res_val:.4e}")
+            N = len(data_g['y_data'])
+            P_gap = len(data_g['popt'])
+            chi2_gap = np.sum(((data_g['y_data'] - data_g['y_fit']) / data_g['sigma'])**2) / (N - P_gap)
+            P_met = P_gap - 1
+            chi2_met = np.sum(((data_g['y_data'] - data_m['y_fit']) / data_g['sigma'])**2) / (N - P_met)
+            res_var.set(f"Reduced Chi-Sq (Gap): {chi2_gap:.4f}   |   (Metal): {chi2_met:.4f}")
             
             ax.legend(loc="best", fontsize=7, frameon=True, edgecolor='black', handlelength=1.2, labelspacing=0.3)
             fig.tight_layout()
