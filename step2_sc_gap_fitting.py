@@ -349,7 +349,7 @@ class Step2_GapFitting(ttk.Frame):
         self.ent_lim_d_max = ttk.Entry(lim_y_d, width=5); self.ent_lim_d_max.pack(side=tk.LEFT, padx=1)
 
         lim_y_g = ttk.Frame(lim_f); lim_y_g.pack(fill=tk.X, pady=1)
-        ttk.Label(lim_y_g, text="Γ Y-axis (eV):").pack(side=tk.LEFT)
+        ttk.Label(lim_y_g, text="Γ Y-axis (meV):").pack(side=tk.LEFT)
         self.ent_lim_g_min = ttk.Entry(lim_y_g, width=5); self.ent_lim_g_min.pack(side=tk.LEFT, padx=1)
         ttk.Label(lim_y_g, text="to").pack(side=tk.LEFT)
         self.ent_lim_g_max = ttk.Entry(lim_y_g, width=5); self.ent_lim_g_max.pack(side=tk.LEFT, padx=1)
@@ -521,9 +521,9 @@ class Step2_GapFitting(ttk.Frame):
         toolbar.pack(side=tk.BOTTOM, fill=tk.X)
         canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        im = ax.imshow(roi, aspect='auto', origin='lower', extent=[k_vals[0], k_vals[-1], e_vals_bg[0], e_vals_bg[-1]], cmap='inferno')
+        im = ax.imshow(roi, aspect='auto', origin='lower', extent=[k_vals[0], k_vals[-1], e_vals_bg[0]*1000, e_vals_bg[-1]*1000], cmap='inferno')
         fig.colorbar(im, ax=ax, label='Intensity (a.u.)')
-        ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=12); ax.set_ylabel('Energy E (eV)', fontsize=12)
+        ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=12); ax.set_ylabel('Energy E (meV)', fontsize=12)
         ax.set_title("Background Estimation Region", fontsize=14)
         fig.tight_layout(); canvas.draw()
 
@@ -570,12 +570,12 @@ class Step2_GapFitting(ttk.Frame):
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
             
-            im0 = axes[0].imshow(self.noise_data[0], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0], e_roi[-1]], cmap='inferno')
+            im0 = axes[0].imshow(self.noise_data[0], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='inferno')
             axes[0].set_title("Original ROI"); fig.colorbar(im0, ax=axes[0])
-            im1 = axes[1].imshow(self.noise_data[1], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0], e_roi[-1]], cmap='inferno')
+            im1 = axes[1].imshow(self.noise_data[1], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='inferno')
             axes[1].set_title("Smoothed (Signal)"); fig.colorbar(im1, ax=axes[1])
             std_res = np.std(self.noise_data[2])
-            im2 = axes[2].imshow(self.noise_data[2], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0], e_roi[-1]], cmap='coolwarm', vmin=-std_res*3, vmax=std_res*3)
+            im2 = axes[2].imshow(self.noise_data[2], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='coolwarm', vmin=-std_res*3, vmax=std_res*3)
             axes[2].set_title(f"Residual (Noise)\nalpha_est = {self.alpha_est:.4f}"); fig.colorbar(im2, ax=axes[2])
             
             fig.tight_layout(pad=2.0, w_pad=3.0)
@@ -643,29 +643,30 @@ class Step2_GapFitting(ttk.Frame):
             
             E_sorted, I_sorted = self.e_raw[e_mask], self.I_raw[e_mask, idx]
             sort_idx = np.argsort(E_sorted); E_sorted, I_sorted = E_sorted[sort_idx], I_sorted[sort_idx]
+            E_plot = E_sorted * 1000
             N, I_left, I_right = len(E_sorted), I_sorted[0], I_sorted[-1]
             
             ax.clear(); B = np.linspace(I_left, I_right, N)
-            ax.plot(E_sorted, I_sorted, label='Original $I(E)$', color='black', linewidth=2)
+            ax.plot(E_plot, I_sorted, label='Original $I(E)$', color='black', linewidth=2)
             
             for n in range(max_iter):
                 B_old = np.copy(B); Y = np.maximum(I_sorted - B_old, 0)
                 cum_int = np.zeros(N); cum_int[1:] = cumulative_trapezoid(Y, E_sorted)
                 if cum_int[-1] == 0: break
                 B = I_right + (I_left - I_right) * ((cum_int[-1] - cum_int) / cum_int[-1])
-                if (n + 1) % plot_step == 0: ax.plot(E_sorted, B, label=f'Iter {n+1}', alpha=0.8)
+                if (n + 1) % plot_step == 0: ax.plot(E_plot, B, label=f'Iter {n+1}', alpha=0.8)
                 if np.max(np.abs(B - B_old)) < tol: break
                 
-            ax.plot(E_sorted, B, label='Final Shirley BG', color='red', linewidth=2.5)
-            ax.plot(E_sorted, np.maximum(I_sorted - B, 1e-4), color='blue', linewidth=2, label='Subtracted Signal')
+            ax.plot(E_plot, B, label='Final Shirley BG', color='red', linewidth=2.5)
+            ax.plot(E_plot, np.maximum(I_sorted - B, 1e-4), color='blue', linewidth=2, label='Subtracted Signal')
             
             self._set_scientific_style(ax)
-            ax.set_xlabel('Energy (eV)', fontsize=14)
+            ax.set_xlabel('Energy (meV)', fontsize=14)
             ax.set_ylabel('Intensity (a.u.)', fontsize=14)
             ax.set_title(fr"Shirley BG Tuning | Momentum = {actual_k:.4f} $\mathrm{{\AA}}^{{-1}}$", fontsize=14)
             
             pad_I = (np.max(I_sorted) - np.min(I_sorted)) * 0.1
-            ax.set_xlim(np.min(E_sorted), np.max(E_sorted))
+            ax.set_xlim(np.min(E_plot), np.max(E_plot))
             ax.set_ylim(0, np.max(I_sorted) + pad_I)
             
             # [FIX 2]: Legend perfectly mapped to the empty right side created by subplots_adjust
@@ -1103,12 +1104,12 @@ class Step2_GapFitting(ttk.Frame):
 
             if plot_I is None: return
 
-            extent = [plot_k[0], plot_k[-1], plot_e[0], plot_e[-1]]
+            extent = [plot_k[0], plot_k[-1], plot_e[0]*1000, plot_e[-1]*1000]
             im = self.ax.imshow(plot_I, aspect='auto', origin='lower', extent=extent, cmap=cmap_to_use, vmin=vmin_global, vmax=vmax_global)
             self.fig.colorbar(im, cax=self.cax)
             self.cax.set_ylabel('Intensity (a.u.)', fontsize=10)
             self.ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=12)
-            self.ax.set_ylabel('Energy E (eV)', fontsize=12)
+            self.ax.set_ylabel('Energy E (meV)', fontsize=12)
             self.ax.set_title(title_text, fontsize=14)
             self.fig.tight_layout()
 
@@ -1364,13 +1365,14 @@ class Step2_GapFitting(ttk.Frame):
             edc_k = self.fit_k_points[idx]
             
             ax.clear()
-            ax.plot(data_g['x'], data_g['y_ori'], color='#AAAAAA', linestyle='--', linewidth=1.5, label='Original')
-            ax.plot(data_g['x'], data_g['y_data'], 'o', markersize=5, color='#555555', markeredgecolor='none', alpha=0.6, label='Experiment')
-            line_fit_gap = ax.plot(data_g['x'], data_g['y_fit'], color='darkblue', linestyle='-', linewidth=2, label=r'Gap Model ($\Delta$ free)')
-            ax.plot(data_g['x'], data_m['y_fit'], color='firebrick', linestyle='-', linewidth=2, label=r'Metal Model ($\Delta=0$)')
+            x_plot = data_g['x'] * 1000
+            ax.plot(x_plot, data_g['y_ori'], color='#AAAAAA', linestyle='--', linewidth=1.5, label='Original')
+            ax.plot(x_plot, data_g['y_data'], 'o', markersize=5, color='#555555', markeredgecolor='none', alpha=0.6, label='Experiment')
+            line_fit_gap = ax.plot(x_plot, data_g['y_fit'], color='darkblue', linestyle='-', linewidth=2, label=r'Gap Model ($\Delta$ free)')
+            ax.plot(x_plot, data_m['y_fit'], color='firebrick', linestyle='-', linewidth=2, label=r'Metal Model ($\Delta=0$)')
             
             self._set_scientific_style(ax)
-            ax.set_xlabel("Energy (eV)", fontsize=14)
+            ax.set_xlabel("Energy (meV)", fontsize=14)
             ax.set_ylabel("ARPES Intensity (a.u.)", fontsize=14)
             ax.set_title(fr"Dual Model Fit Comparison | k = {edc_k:.4f} $\mathrm{{\AA}}^{{-1}}$", fontsize=14)
             

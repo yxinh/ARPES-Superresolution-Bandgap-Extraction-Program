@@ -497,31 +497,33 @@ class Step1_BandExtraction(ttk.Frame):
         else:
             vmin_global, vmax_global = np.nanmin(self.I_raw), np.nanmax(self.I_raw)
 
-        extent = [plot_k[0], plot_k[-1], plot_e[0], plot_e[-1]]
+        extent = [plot_k[0], plot_k[-1], plot_e[0]*1000, plot_e[-1]*1000]
         im = self.ax.imshow(plot_I, aspect='auto', origin='lower', extent=extent, cmap='inferno', vmin=vmin_global, vmax=vmax_global)
         self.fig.colorbar(im, cax=self.cax)
         self.cax.set_ylabel('Intensity (a.u.)', fontsize=10)
         self.ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=12)
-        self.ax.set_ylabel('Energy E (eV)', fontsize=12)
+        self.ax.set_ylabel('Energy E (meV)', fontsize=12)
         self.ax.set_title(title_text, fontsize=14)
         
         if "Background" not in mode:
             if self.extracted_points:
                 ks, es = zip(*self.extracted_points)
-                self.ax.scatter(ks, es, c='white', s=2, alpha=0.5, label='Extracted Points')
+                es_plot = [e * 1000 for e in es]
+                self.ax.scatter(ks, es_plot, c='white', s=2, alpha=0.5, label='Extracted Points')
             if self.selected_points:
                 ks_sel, es_sel = zip(*self.selected_points)
-                self.ax.scatter(ks_sel, es_sel, c='red', s=12, marker='o', label='Selected Points')
+                es_sel_plot = [e * 1000 for e in es_sel]
+                self.ax.scatter(ks_sel, es_sel_plot, c='red', s=12, marker='o', label='Selected Points')
             if self.spline_func is not None:
                 k_smooth = np.linspace(min(ks_sel), max(ks_sel), 200)
-                self.ax.plot(k_smooth, self.spline_func(k_smooth), 'g-', linewidth=2, label='Fitted Spline Band')
+                self.ax.plot(k_smooth, self.spline_func(k_smooth) * 1000, 'g-', linewidth=2, label='Fitted Spline Band')
             if self.extracted_points or self.selected_points or self.spline_func:
                 self.ax.legend(loc='upper right', fontsize=7, frameon=True, facecolor='white', edgecolor='gray', framealpha=0.8)
                 
         if preserve_limits and xlim is not None and ylim is not None:
             self.ax.set_xlim(xlim); self.ax.set_ylim(ylim)
         else:
-            self.ax.set_xlim(plot_k[0], plot_k[-1]); self.ax.set_ylim(plot_e[0], plot_e[-1])
+            self.ax.set_xlim(plot_k[0], plot_k[-1]); self.ax.set_ylim(plot_e[0] * 1000, plot_e[-1] * 1000)
                 
         self.fig.tight_layout(); self.canvas.draw()
 
@@ -551,11 +553,11 @@ class Step1_BandExtraction(ttk.Frame):
         toolbar.pack(side=tk.BOTTOM, fill=tk.X)
         canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        extent = [k_vals[0], k_vals[-1], e_vals_bg[0], e_vals_bg[-1]]
+        extent = [k_vals[0], k_vals[-1], e_vals_bg[0]*1000, e_vals_bg[-1]*1000]
         im = ax.imshow(roi, aspect='auto', origin='lower', extent=extent, cmap='inferno')
         fig.colorbar(im, ax=ax, label='Intensity (a.u.)')
         ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=12)
-        ax.set_ylabel('Energy E (eV)', fontsize=12)
+        ax.set_ylabel('Energy E (meV)', fontsize=12)
         ax.set_title("Background Estimation Region", fontsize=14)
         fig.tight_layout()
         canvas.draw()
@@ -603,12 +605,12 @@ class Step1_BandExtraction(ttk.Frame):
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
             
-            im0 = axes[0].imshow(self.noise_data[0], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0], e_roi[-1]], cmap='inferno')
+            im0 = axes[0].imshow(self.noise_data[0], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='inferno')
             axes[0].set_title("Original ROI"); fig.colorbar(im0, ax=axes[0])
-            im1 = axes[1].imshow(self.noise_data[1], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0], e_roi[-1]], cmap='inferno')
+            im1 = axes[1].imshow(self.noise_data[1], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='inferno')
             axes[1].set_title("Smoothed (Signal)"); fig.colorbar(im1, ax=axes[1])
             std_res = np.std(self.noise_data[2])
-            im2 = axes[2].imshow(self.noise_data[2], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0], e_roi[-1]], cmap='coolwarm', vmin=-std_res*3, vmax=std_res*3)
+            im2 = axes[2].imshow(self.noise_data[2], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='coolwarm', vmin=-std_res*3, vmax=std_res*3)
             axes[2].set_title(f"Residual (Noise)\nalpha_est = {self.alpha_est:.4f}"); fig.colorbar(im2, ax=axes[2])
             
             fig.tight_layout(pad=2.0, w_pad=3.0)
@@ -676,29 +678,30 @@ class Step1_BandExtraction(ttk.Frame):
             
             E_sorted, I_sorted = self.e_raw[e_mask], self.I_raw[e_mask, idx]
             sort_idx = np.argsort(E_sorted); E_sorted, I_sorted = E_sorted[sort_idx], I_sorted[sort_idx]
+            E_plot = E_sorted * 1000
             N, I_left, I_right = len(E_sorted), I_sorted[0], I_sorted[-1]
             
             ax.clear(); B = np.linspace(I_left, I_right, N)
-            ax.plot(E_sorted, I_sorted, label='Original $I(E)$', color='black', linewidth=2)
+            ax.plot(E_plot, I_sorted, label='Original $I(E)$', color='black', linewidth=2)
             
             for n in range(max_iter):
                 B_old = np.copy(B); Y = np.maximum(I_sorted - B_old, 0)
                 cum_int = np.zeros(N); cum_int[1:] = cumulative_trapezoid(Y, E_sorted)
                 if cum_int[-1] == 0: break
                 B = I_right + (I_left - I_right) * ((cum_int[-1] - cum_int) / cum_int[-1])
-                if (n + 1) % plot_step == 0: ax.plot(E_sorted, B, label=f'Iter {n+1}', alpha=0.8)
+                if (n + 1) % plot_step == 0: ax.plot(E_plot, B, label=f'Iter {n+1}', alpha=0.8)
                 if np.max(np.abs(B - B_old)) < tol: break
                 
-            ax.plot(E_sorted, B, label='Final Shirley BG', color='red', linewidth=2.5)
-            ax.plot(E_sorted, np.maximum(I_sorted - B, 1e-4), color='blue', linewidth=2, label='Subtracted Signal')
+            ax.plot(E_plot, B, label='Final Shirley BG', color='red', linewidth=2.5)
+            ax.plot(E_plot, np.maximum(I_sorted - B, 1e-4), color='blue', linewidth=2, label='Subtracted Signal')
             
             self._set_scientific_style(ax)
-            ax.set_xlabel('Energy (eV)', fontsize=14)
+            ax.set_xlabel('Energy (meV)', fontsize=14)
             ax.set_ylabel('Intensity (a.u.)', fontsize=14)
             ax.set_title(fr"Shirley BG Tuning | Momentum = {actual_k:.4f} $\mathrm{{\AA}}^{{-1}}$", fontsize=14)
             
             pad_I = (np.max(I_sorted) - np.min(I_sorted)) * 0.1
-            ax.set_xlim(np.min(E_sorted), np.max(E_sorted))
+            ax.set_xlim(np.min(E_plot), np.max(E_plot))
             ax.set_ylim(0, np.max(I_sorted) + pad_I)
             
             # [FIX 2]: Legend perfectly mapped to the empty right side created by subplots_adjust
@@ -1091,18 +1094,19 @@ class Step1_BandExtraction(ttk.Frame):
             data = ds[current_idx[0]]
             
             ax.clear()
-            ax.plot(data['x'], data['y_ori'], color='#AAAAAA', linestyle='--', linewidth=1.5, label='Original')
-            ax.plot(data['x'], data['y_data'], 'o', markersize=5, color='#555555', markeredgecolor='none', alpha=0.6, label='Experiment')
-            line_fit = ax.plot(data['x'], data['y_fit'], color='darkblue', linestyle='-', linewidth=2, label=f'Fitting ({mode_var.get()} Peak)')
+            x_plot = data['x'] * 1000 if mode_var.get() == 'EDC' else data['x']
+            ax.plot(x_plot, data['y_ori'], color='#AAAAAA', linestyle='--', linewidth=1.5, label='Original')
+            ax.plot(x_plot, data['y_data'], 'o', markersize=5, color='#555555', markeredgecolor='none', alpha=0.6, label='Experiment')
+            line_fit = ax.plot(x_plot, data['y_fit'], color='darkblue', linestyle='-', linewidth=2, label=f'Fitting ({mode_var.get()} Peak)')
             
             self._set_scientific_style(ax)
             if mode_var.get() == "EDC":
-                ax.set_xlabel("Energy (eV)", fontsize=14)
+                ax.set_xlabel("Energy (meV)", fontsize=14)
                 ax.set_title(fr"EDC Fit Inspection | k = {data['k']:.4f} $\mathrm{{\AA}}^{{-1}}$", fontsize=14)
                 names = ["Amplitude", "Peak E0", "Gamma"]
             else:
                 ax.set_xlabel(fr"Momentum k ($\mathrm{{\AA}}^{{-1}}$)", fontsize=14)
-                ax.set_title(f"MDC Fit Inspection | E = {data['E']:.4f} eV", fontsize=14)
+                ax.set_title(f"MDC Fit Inspection | E = {data['E']*1000:.2f} meV", fontsize=14)
                 names = ["Amp 1", "Peak 1", "Gamma 1", "Amp 2", "Peak 2", "Gamma 2"]
                 
             ax.set_ylabel("ARPES Intensity (a.u.)", fontsize=14)
@@ -1129,14 +1133,21 @@ class Step1_BandExtraction(ttk.Frame):
         if self.toolbar.mode != '' and event.button != 3: return
             
         if self.picking_seed and event.xdata is not None and event.ydata is not None:
-            self.ent_seed_k.delete(0, tk.END); self.ent_seed_k.insert(0, f"{event.xdata:.4f}")
-            self.ent_seed_e.delete(0, tk.END); self.ent_seed_e.insert(0, f"{event.ydata:.4f}")
+            # Display uses meV on the plot; convert back to eV for internal entries
+            seed_k_val = event.xdata
+            seed_e_val_eV = event.ydata / 1000.0
+            self.ent_seed_k.delete(0, tk.END); self.ent_seed_k.insert(0, f"{seed_k_val:.4f}")
+            self.ent_seed_e.delete(0, tk.END); self.ent_seed_e.insert(0, f"{seed_e_val_eV:.4f}")
             self.picking_seed = False; self.btn_pick_seed.config(text="Pick Plot")
             return
             
         if not self.extracted_points or event.x is None or event.y is None: return
         pts_data = np.array(self.extracted_points)
-        pts_screen = self.ax.transData.transform(pts_data)
+        if pts_data.size == 0:
+            return
+        pts_plot = pts_data.copy()
+        pts_plot[:, 1] = pts_plot[:, 1] * 1000.0  # convert stored eV -> plotted meV for transform
+        pts_screen = self.ax.transData.transform(pts_plot)
         click_screen = np.array([event.x, event.y])
         distances = np.sqrt(np.sum((pts_screen - click_screen)**2, axis=1))
         nearest_idx = np.argmin(distances)
