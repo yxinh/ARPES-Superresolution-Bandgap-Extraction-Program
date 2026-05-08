@@ -68,9 +68,7 @@ class Step3_TemperatureDependence(ttk.Frame):
         ttk.Label(f2, text="Target k (or 'kF'):").pack(side=tk.LEFT)
         self.ent_k_ref = ttk.Entry(f2, width=8); self.ent_k_ref.insert(0, "kF"); self.ent_k_ref.pack(side=tk.RIGHT)
 
-        f3 = ttk.Frame(frame_param); f3.pack(fill=tk.X, pady=2)
-        ttk.Label(f3, text="Err Mult for Weighting:").pack(side=tk.LEFT)
-        self.ent_err_mult = ttk.Entry(f3, width=8); self.ent_err_mult.insert(0, "2.0"); self.ent_err_mult.pack(side=tk.RIGHT)
+        # Note: Err Mult for Weighting removed — weighted results must be provided by Step 2 export or memory
         
         ttk.Button(frame_param, text="Recalculate Physics", command=self._calculate_physics).pack(fill=tk.X, pady=5)
 
@@ -151,9 +149,17 @@ class Step3_TemperatureDependence(ttk.Frame):
                             if 'WeightedErr' in p:
                                 try: weighted_err = float(p.split(':')[1].strip())
                                 except: weighted_err = None
+                            if 'WeightedGamma' in p:
+                                try: weighted_gamma = float(p.split(':')[1].strip())
+                                except: weighted_gamma = None
+                            if 'WeightedGammaErr' in p:
+                                try: weighted_gamma_err = float(p.split(':')[1].strip())
+                                except: weighted_gamma_err = None
                     else:
                         weighted_delta = None
                         weighted_err = None
+                        weighted_gamma = None
+                        weighted_gamma_err = None
                 
                 # 如果没读到 T，使用文件名 fallback
                 if T_val is None:
@@ -161,16 +167,36 @@ class Step3_TemperatureDependence(ttk.Frame):
                 
                 # 读取矩阵数据
                 data = np.loadtxt(fpath, skiprows=4)
-                if data.shape[1] < 8: continue
-                
+                if data.shape[1] < 8:
+                    continue
+
+                # Build weighted_res only if all four weighted values are present
+                weighted_res_obj = None
+                if ('weighted_delta' in locals() and weighted_delta is not None and
+                    'weighted_err' in locals() and weighted_err is not None and
+                    'weighted_gamma' in locals() and weighted_gamma is not None and
+                    'weighted_gamma_err' in locals() and weighted_gamma_err is not None):
+                    weighted_res_obj = {
+                        'delta_best': weighted_delta,
+                        'error_best': weighted_err,
+                        'gamma_best': weighted_gamma,
+                        'gamma_err': weighted_gamma_err
+                    }
+
                 self.temp_data.append({
                     'T': T_val, 'kF': kF_val,
                     'k_vals': data[:, 0], 'delta_vals': data[:, 1], 'err_vals': data[:, 2],
                     'gamma_vals': data[:, 3], 'gamma_err_vals': data[:, 4],
                     'RSS_gap': data[:, 5], 'RSS_met': data[:, 6], 'p_vals': data[:, 7],
-                    'weighted_res': {'delta_best': weighted_delta, 'error_best': weighted_err} if (('weighted_delta' in locals() and weighted_delta is not None) or ('weighted_err' in locals() and weighted_err is not None)) else None
+                    'weighted_res': weighted_res_obj
                 })
             
+            # Verify every file contains weighted results; otherwise prompt format error
+            missing = [d for d in self.temp_data if d.get('weighted_res') is None]
+            if missing:
+                self.temp_data = []
+                return messagebox.showerror("Format Error", "One or more files are missing weighted results. Please export from Step 2 with WeightedDelta/WeightedErr or use 'Load from Step 2 (Memory)'.")
+
             self.temp_data.sort(key=lambda x: x['T'])
             self.lbl_status.config(text=f"Loaded {len(self.temp_data)} files.", foreground="green")
             self._calculate_physics()
@@ -199,6 +225,14 @@ class Step3_TemperatureDependence(ttk.Frame):
                     'p_vals': np.array(stats.get('p_vals', [])),
                     'weighted_res': res.get('weighted_res', None)
                 })
+            # If any memory entries lack weighted_res or required keys, prompt Format Error
+            def has_required_weighted(w):
+                return (w is not None and isinstance(w, dict) and 'delta_best' in w and 'error_best' in w and 'gamma_best' in w and 'gamma_err' in w)
+
+            missing_mem = [d for d in self.temp_data if not has_required_weighted(d.get('weighted_res'))]
+            if missing_mem:
+                self.temp_data = []
+                return messagebox.showerror("Format Error", "Saved results from Step 2 are missing complete weighted results (delta and gamma). Please ensure Step 2 saving includes weighted results.")
             self.temp_data.sort(key=lambda x: x['T'])
             self.lbl_status.config(text=f"Loaded {len(self.temp_data)} sets (Memory).", foreground="green")
             self._calculate_physics()
@@ -214,7 +248,6 @@ class Step3_TemperatureDependence(ttk.Frame):
         try:
             p_thresh = float(self.ent_p_thresh.get())
             k_ref_str = self.ent_k_ref.get()
-            err_mult = float(self.ent_err_mult.get())
         except ValueError:
             return messagebox.showerror("Error", "Invalid analysis parameters.")
             
@@ -250,39 +283,15 @@ class Step3_TemperatureDependence(ttk.Frame):
                 self.Tc_estimate = T
                 gap_closed = True
                 
-            # 2. Dynamic Weighted Method (prefer Step 2's precomputed weighted result when available)
+            # 2. Weighted Method: use Step 2's precomputed weighted result
             weighted = item.get('weighted_res', None)
-            if weighted is not None and weighted.get('delta_best', None) is not None:
-                w_delta = weighted.get('delta_best')
-                w_err = weighted.get('error_best')
-            else:
-                # --- For Delta ---
-                lb_d = sp_delta - err_mult * sp_err
-                ub_d = sp_delta + err_mult * sp_err
+            if weighted is None or weighted.get('delta_best', None) is None or weighted.get('gamma_best', None) is None:
+                return messagebox.showerror("Format Error", "Missing weighted delta/gamma results for T={}. Please export from Step 2 with WeightedDelta/WeightedErr/WeightedGamma/WeightedGammaErr or load from Step 2 memory.".format(T))
 
-                left_d = target_idx
-                while left_d > 0 and lb_d <= item['delta_vals'][left_d-1] <= ub_d: left_d -= 1
-                right_d = target_idx
-                while right_d < len(k_vals)-1 and lb_d <= item['delta_vals'][right_d+1] <= ub_d: right_d += 1
-
-                valid_idx_d = list(range(left_d, right_d+1))
-                w_d = 1.0 / (item['err_vals'][valid_idx_d]**2 + 1e-15)
-                w_delta = np.sum(w_d * item['delta_vals'][valid_idx_d]) / np.sum(w_d)
-                w_err = np.sqrt(1.0 / np.sum(w_d))
-
-            # --- For Gamma (still computed here) ---
-            lb_g = sp_gamma - err_mult * sp_g_err
-            ub_g = sp_gamma + err_mult * sp_g_err
-
-            left_g = target_idx
-            while left_g > 0 and lb_g <= item['gamma_vals'][left_g-1] <= ub_g: left_g -= 1
-            right_g = target_idx
-            while right_g < len(k_vals)-1 and lb_g <= item['gamma_vals'][right_g+1] <= ub_g: right_g += 1
-
-            valid_idx_g = list(range(left_g, right_g+1))
-            w_g = 1.0 / (item['gamma_err_vals'][valid_idx_g]**2 + 1e-15)
-            w_gamma = np.sum(w_g * item['gamma_vals'][valid_idx_g]) / np.sum(w_g)
-            w_g_err = np.sqrt(1.0 / np.sum(w_g))
+            w_delta = weighted.get('delta_best')
+            w_err = weighted.get('error_best')
+            w_gamma = weighted.get('gamma_best')
+            w_g_err = weighted.get('gamma_err')
 
             self.extracted_physics.append({
                 'T': T, 'k_target': k_target,

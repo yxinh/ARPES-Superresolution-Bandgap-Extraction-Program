@@ -1012,6 +1012,8 @@ class Step2_GapFitting(ttk.Frame):
         k_vals = np.array(self.fit_k_points)
         delta_vals = np.array(self.final_stats['delta_fit'])
         err_vals = np.array(self.final_stats['delta_err'])
+        gamma_vals = np.array(self.final_stats.get('gamma_fit', []))
+        gamma_errs = np.array(self.final_stats.get('gamma_err', []))
 
         # Determine kF and its index / uncertainty
         if self.kF_actual is not None:
@@ -1072,6 +1074,20 @@ class Step2_GapFitting(ttk.Frame):
             sel_err = sel_err[valid_mask]
             sel_k = sel_k[valid_mask]
 
+            # compute weighted gamma on the same selected indices when possible
+            sel_gamma = gamma_vals[sel_idx]
+            sel_gamma_err = gamma_errs[sel_idx]
+            sel_gamma = sel_gamma[valid_mask]
+            sel_gamma_err = sel_gamma_err[valid_mask]
+
+            gamma_best, gamma_err = np.nan, np.nan
+            if sel_gamma.size > 0:
+                valid_g_mask = np.isfinite(sel_gamma_err) & (sel_gamma_err > 0)
+                if np.any(valid_g_mask):
+                    wg = 1.0 / (sel_gamma_err[valid_g_mask]**2 + 1e-12)
+                    gamma_best = np.sum(wg * sel_gamma[valid_g_mask]) / np.sum(wg)
+                    gamma_err = np.sqrt(1.0 / np.sum(wg))
+
             weights = 1.0 / (sel_err**2 + 1e-12)
             delta_best = np.sum(weights * sel_delta) / np.sum(weights)
             error_best = np.sqrt(1.0 / np.sum(weights))
@@ -1095,6 +1111,8 @@ class Step2_GapFitting(ttk.Frame):
                     'sel_err': sel_err,
                     'delta_best': delta_best,
                     'error_best': error_best,
+                    'gamma_best': gamma_best,
+                    'gamma_err': gamma_err,
                     'chi2_nu': chi2_nu
                 }
 
@@ -1126,6 +1144,17 @@ class Step2_GapFitting(ttk.Frame):
             dof = len(sel_delta) - 1
             chi2_nu = np.sum(((sel_delta - delta_best) / sel_err)**2) / dof if dof > 0 else 0.0
 
+            # compute gamma weighted similarly for fallback
+            sel_gamma_fb = gamma_vals[sel_idx]
+            sel_gamma_err_fb = gamma_errs[sel_idx]
+            gamma_best_fb, gamma_err_fb = np.nan, np.nan
+            if sel_gamma_fb.size > 0:
+                valid_g_mask_fb = np.isfinite(sel_gamma_err_fb) & (sel_gamma_err_fb > 0)
+                if np.any(valid_g_mask_fb):
+                    wg_fb = 1.0 / (sel_gamma_err_fb[valid_g_mask_fb]**2 + 1e-12)
+                    gamma_best_fb = np.sum(wg_fb * sel_gamma_fb[valid_g_mask_fb]) / np.sum(wg_fb)
+                    gamma_err_fb = np.sqrt(1.0 / np.sum(wg_fb))
+
             best_result = {
                 'kF': kF,
                 'mid_idx': mid_idx,
@@ -1136,6 +1165,8 @@ class Step2_GapFitting(ttk.Frame):
                 'sel_err': sel_err,
                 'delta_best': delta_best,
                 'error_best': error_best,
+                'gamma_best': gamma_best_fb,
+                'gamma_err': gamma_err_fb,
                 'chi2_nu': chi2_nu
             }
 
@@ -1625,13 +1656,18 @@ class Step2_GapFitting(ttk.Frame):
                 if weighted is not None:
                     w_delta = weighted.get('delta_best', np.nan)
                     w_err = weighted.get('error_best', np.nan)
+                    w_gamma = weighted.get('gamma_best', np.nan)
+                    w_g_err = weighted.get('gamma_err', np.nan)
                 else:
                     w_delta = np.nan
                     w_err = np.nan
+                    w_gamma = np.nan
+                    w_g_err = np.nan
 
                 header_str = (
                     "Exported Fit Results\n" +
-                    f"Temperature: {T_val} K, kF: {kF_str}, WeightedDelta: {w_delta:.8e}, WeightedErr: {w_err:.8e}\n" +
+                    f"Temperature: {T_val} K, kF: {kF_str}, WeightedDelta: {w_delta:.8e}, WeightedErr: {w_err:.8e}, "
+                    f"WeightedGamma: {w_gamma:.8e}, WeightedGammaErr: {w_g_err:.8e}\n" +
                     "--------------------------------------------------------------------------------\n" +
                     "k_vals\tdelta_fit\tdelta_err\tgamma_fit\tgamma_err\tRSS_gap\tRSS_met\tp_vals"
                 )
