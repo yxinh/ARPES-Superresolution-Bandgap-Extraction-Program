@@ -100,6 +100,13 @@ class Step2_GapFitting(ttk.Frame):
         self.cb_view.current(0)
         self.cb_view.pack(side=tk.LEFT, padx=5)
         self.cb_view.bind("<<ComboboxSelected>>", self._on_display_mode_change)
+        # Ensure radio/check labels look enabled across themes
+        try:
+            style = ttk.Style()
+            style.configure('TRadiobutton', foreground='black')
+            style.configure('TCheckbutton', foreground='black')
+        except Exception:
+            pass
         
         self.fig = plt.figure(figsize=(7, 5))
         self.ax = self.fig.add_subplot(111)
@@ -326,8 +333,18 @@ class Step2_GapFitting(ttk.Frame):
         self.ent_err_mult = ttk.Entry(mult_f, width=5)
         self.ent_err_mult.pack(side=tk.LEFT, padx=5)
         self.ent_err_mult.insert(0, "1.5")
-        self.ent_err_mult.bind("<Return>", lambda e: self._on_display_mode_change())
-        self.ent_err_mult.bind("<FocusOut>", lambda e: self._on_display_mode_change())
+
+        # Keep Max Err Ratio on a separate row to avoid UI overlap
+        ratio_f = ttk.Frame(ext_f); ratio_f.pack(fill=tk.X, pady=1)
+        ttk.Label(ratio_f, text="Max Err Ratio (kF*x):").pack(side=tk.LEFT)
+        self.ent_err_ratio = ttk.Entry(ratio_f, width=5)
+        self.ent_err_ratio.pack(side=tk.LEFT, padx=5)
+        self.ent_err_ratio.insert(0, "1.5")
+
+        # Bind updates to both entries so plot refreshes when values change
+        for ent in (self.ent_err_mult, self.ent_err_ratio):
+            ent.bind("<Return>", lambda e: self._on_display_mode_change())
+            ent.bind("<FocusOut>", lambda e: self._on_display_mode_change())
         
         res1_f = ttk.Frame(ext_f); res1_f.pack(fill=tk.X, pady=1)
         ttk.Label(res1_f, text="Delta at kF:").pack(side=tk.LEFT)
@@ -989,55 +1006,145 @@ class Step2_GapFitting(ttk.Frame):
     # --- Helper: Calculate Weighted Delta ---
     # =============================================================================
     def _get_weighted_delta(self):
-        if not self.final_stats: return None
-        
+        if not self.final_stats:
+            return None
+
         k_vals = np.array(self.fit_k_points)
-        delta_vals = self.final_stats['delta_fit']
-        err_vals = self.final_stats['delta_err']
-        
+        delta_vals = np.array(self.final_stats['delta_fit'])
+        err_vals = np.array(self.final_stats['delta_err'])
+
+        # Determine kF and its index / uncertainty
         if self.kF_actual is not None:
             kF = self.kF_actual
         else:
             kF = (np.min(k_vals) + np.max(k_vals)) / 2.0
-            
-        mid_idx = np.argmin(np.abs(k_vals - kF))
-        delta_mid = delta_vals[mid_idx]
-        err_mid = err_vals[mid_idx]
-        
-        try: N_mult = float(self.ent_err_mult.get())
-        except ValueError: N_mult = 2.0
-            
-        lower_bound = delta_mid - N_mult * err_mid
-        upper_bound = delta_mid + N_mult * err_mid
-        
-        left_idx = mid_idx
-        while left_idx > 0 and lower_bound <= delta_vals[left_idx-1] <= upper_bound:
-            left_idx -= 1
-            
-        right_idx = mid_idx
-        while right_idx < len(k_vals) - 1 and lower_bound <= delta_vals[right_idx+1] <= upper_bound:
-            right_idx += 1
-            
-        sel_idx = slice(left_idx, right_idx + 1)
-        sel_k = k_vals[sel_idx]
-        sel_delta = delta_vals[sel_idx]
-        sel_err = err_vals[sel_idx]
-        
-        weights = 1.0 / (sel_err**2 + 1e-12)
-        delta_best = np.sum(weights * sel_delta) / np.sum(weights)
-        error_best = np.sqrt(1.0 / np.sum(weights))
-        
-        dof = len(sel_delta) - 1
-        if dof > 0:
-            chi2_nu = np.sum(((sel_delta - delta_best) / sel_err)**2) / dof
-        else:
-            chi2_nu = 0.0
-            
-        return {
-            'kF': kF, 'mid_idx': mid_idx, 'delta_mid': delta_mid, 'err_mid': err_mid,
-            'sel_k': sel_k, 'sel_delta': sel_delta, 'sel_err': sel_err,
-            'delta_best': delta_best, 'error_best': error_best, 'chi2_nu': chi2_nu
-        }
+
+        kf_idx = np.argmin(np.abs(k_vals - kF))
+        kf_err = err_vals[kf_idx] if (0 <= kf_idx < len(err_vals)) else np.nan
+        kf_delta = delta_vals[kf_idx] if (0 <= kf_idx < len(delta_vals)) else np.nan
+
+        try:
+            N_mult = float(self.ent_err_mult.get())
+        except Exception:
+            N_mult = 2.0
+
+        try:
+            max_err_ratio = float(self.ent_err_ratio.get())
+        except Exception:
+            max_err_ratio = 1.5
+
+        best_result = None
+        best_error = np.inf
+
+        # For each momentum point, perform left/right exploration centered at that point
+        for i in range(len(k_vals)):
+            err_i = err_vals[i]
+            if not np.isfinite(err_i) or err_i <= 0:
+                continue
+
+            # Exclude centers whose uncertainty is too large compared to kF
+            if np.isfinite(kf_err) and kf_err > 0:
+                if err_i > kf_err * max_err_ratio:
+                    continue
+
+            delta_i = delta_vals[i]
+            lower_bound = delta_i - N_mult * err_i
+            upper_bound = delta_i + N_mult * err_i
+
+            left_idx = i
+            while left_idx > 0 and lower_bound <= delta_vals[left_idx - 1] <= upper_bound:
+                left_idx -= 1
+
+            right_idx = i
+            while right_idx < len(k_vals) - 1 and lower_bound <= delta_vals[right_idx + 1] <= upper_bound:
+                right_idx += 1
+
+            sel_idx = slice(left_idx, right_idx + 1)
+            sel_delta = delta_vals[sel_idx]
+            sel_err = err_vals[sel_idx]
+            sel_k = k_vals[sel_idx]
+
+            valid_mask = np.isfinite(sel_err) & (sel_err > 0)
+            if not np.any(valid_mask):
+                continue
+
+            sel_delta = sel_delta[valid_mask]
+            sel_err = sel_err[valid_mask]
+            sel_k = sel_k[valid_mask]
+
+            weights = 1.0 / (sel_err**2 + 1e-12)
+            delta_best = np.sum(weights * sel_delta) / np.sum(weights)
+            error_best = np.sqrt(1.0 / np.sum(weights))
+
+            dof = len(sel_delta) - 1
+            if dof > 0:
+                chi2_nu = np.sum(((sel_delta - delta_best) / sel_err)**2) / dof
+            else:
+                chi2_nu = 0.0
+
+            # Keep the center that yields minimal combined uncertainty
+            if error_best < best_error:
+                best_error = error_best
+                best_result = {
+                    'kF': kF,
+                    'mid_idx': i,
+                    'delta_mid': delta_i,
+                    'err_mid': err_i,
+                    'sel_k': sel_k,
+                    'sel_delta': sel_delta,
+                    'sel_err': sel_err,
+                    'delta_best': delta_best,
+                    'error_best': error_best,
+                    'chi2_nu': chi2_nu
+                }
+
+        # If none found (rare), fall back to original kF-centered behavior
+        if best_result is None:
+            mid_idx = kf_idx if (0 <= kf_idx < len(k_vals)) else np.argmin(np.abs(k_vals - kF))
+            delta_mid = delta_vals[mid_idx]
+            err_mid = err_vals[mid_idx]
+
+            lower_bound = delta_mid - N_mult * err_mid
+            upper_bound = delta_mid + N_mult * err_mid
+
+            left_idx = mid_idx
+            while left_idx > 0 and lower_bound <= delta_vals[left_idx - 1] <= upper_bound:
+                left_idx -= 1
+
+            right_idx = mid_idx
+            while right_idx < len(k_vals) - 1 and lower_bound <= delta_vals[right_idx + 1] <= upper_bound:
+                right_idx += 1
+
+            sel_idx = slice(left_idx, right_idx + 1)
+            sel_k = k_vals[sel_idx]
+            sel_delta = delta_vals[sel_idx]
+            sel_err = err_vals[sel_idx]
+
+            weights = 1.0 / (sel_err**2 + 1e-12)
+            delta_best = np.sum(weights * sel_delta) / np.sum(weights)
+            error_best = np.sqrt(1.0 / np.sum(weights))
+            dof = len(sel_delta) - 1
+            chi2_nu = np.sum(((sel_delta - delta_best) / sel_err)**2) / dof if dof > 0 else 0.0
+
+            best_result = {
+                'kF': kF,
+                'mid_idx': mid_idx,
+                'delta_mid': delta_mid,
+                'err_mid': err_mid,
+                'sel_k': sel_k,
+                'sel_delta': sel_delta,
+                'sel_err': sel_err,
+                'delta_best': delta_best,
+                'error_best': error_best,
+                'chi2_nu': chi2_nu
+            }
+
+        # Always include kF-point values in the result
+        if best_result is not None:
+            best_result['delta_kf'] = kf_delta
+            best_result['err_kf'] = kf_err
+
+        return best_result
 
     # =============================================================================
     # --- Plotting & Visualization ---
@@ -1137,13 +1244,15 @@ class Step2_GapFitting(ttk.Frame):
             w_res = self._get_weighted_delta()
             if w_res is None: return
             
-            kF = w_res['kF']
-            delta_mid, err_mid = w_res['delta_mid'], w_res['err_mid']
+            kF = w_res.get('kF', None)
+            delta_kf = w_res.get('delta_kf', w_res.get('delta_mid', np.nan))
+            err_kf = w_res.get('err_kf', w_res.get('err_mid', np.nan))
             sel_k = w_res['sel_k']
             delta_best, error_best = w_res['delta_best'], w_res['error_best']
             chi2_nu = w_res['chi2_nu']
-                
-            self.var_delta_kf.set(f"{delta_mid*1000:.2f} \u00B1 {err_mid*1000:.2f} meV")
+
+            # Show delta at kF explicitly (not the chosen search-center)
+            self.var_delta_kf.set(f"{delta_kf*1000:.2f} \u00B1 {err_kf*1000:.2f} meV")
             self.var_delta_best.set(f"{delta_best*1000:.2f} \u00B1 {error_best*1000:.2f} meV")
 
             delta_vals_meV = self.final_stats['delta_fit'] * 1000
@@ -1167,7 +1276,7 @@ class Step2_GapFitting(ttk.Frame):
             
             res_str = (
                 f"Interval: [{sel_k[0]:.3f}, {sel_k[-1]:.3f}]\n"
-                f"$\\Delta_F$ = {delta_mid*1000:.2f} $\\pm$ {err_mid*1000:.2f} meV\n"
+                f"$\\Delta_F$ = {delta_kf*1000:.2f} $\\pm$ {err_kf*1000:.2f} meV\n"
                 f"$\\Delta_{{best}}$ = {delta_best*1000:.2f} $\\pm$ {error_best*1000:.2f} meV\n"
                 f"$\\chi^2_\\nu$ = {chi2_nu:.2f}"
             )
@@ -1512,11 +1621,21 @@ class Step2_GapFitting(ttk.Frame):
                 ))
                 
                 # 5. Write file with a 4-line header (updated column names)
-                header_str = "Exported Fit Results\n" + \
-                             f"Temperature: {T_val} K, kF: {kF_str}\n" + \
-                             "--------------------------------------------------------------------------------\n" + \
-                             "k_vals\tdelta_fit\tdelta_err\tgamma_fit\tgamma_err\tRSS_gap\tRSS_met\tp_vals"
-                             
+                weighted = res.get('weighted_res', None)
+                if weighted is not None:
+                    w_delta = weighted.get('delta_best', np.nan)
+                    w_err = weighted.get('error_best', np.nan)
+                else:
+                    w_delta = np.nan
+                    w_err = np.nan
+
+                header_str = (
+                    "Exported Fit Results\n" +
+                    f"Temperature: {T_val} K, kF: {kF_str}, WeightedDelta: {w_delta:.8e}, WeightedErr: {w_err:.8e}\n" +
+                    "--------------------------------------------------------------------------------\n" +
+                    "k_vals\tdelta_fit\tdelta_err\tgamma_fit\tgamma_err\tRSS_gap\tRSS_met\tp_vals"
+                )
+
                 np.savetxt(file_path, export_data, header=header_str, comments='', delimiter='\t', fmt='%.8e')
                 
             messagebox.showinfo("Success", f"Successfully exported {len(self.saved_results)} files to:\n{export_dir}")

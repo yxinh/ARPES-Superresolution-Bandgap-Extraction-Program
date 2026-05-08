@@ -134,10 +134,10 @@ class Step3_TemperatureDependence(ttk.Frame):
                 
                 # 读取并解析文件头部，获取 T 和 kF
                 with open(fpath, 'r') as f:
-                    lines = [f.readline() for _ in range(3)]
-                    # 第二行通常是: Temperature: 14.0 K, kF: 0.1234
+                    lines = [f.readline() for _ in range(4)]
+                    # 第二行通常包含: Temperature: 14.0 K, kF: 0.1234, WeightedDelta: ..., WeightedErr: ...
                     if len(lines) >= 2 and 'Temperature' in lines[1]:
-                        parts = lines[1].split(',')
+                        parts = [p.strip() for p in lines[1].split(',')]
                         for p in parts:
                             if 'Temperature' in p:
                                 try: T_val = float(p.split(':')[1].replace('K', '').strip())
@@ -145,6 +145,15 @@ class Step3_TemperatureDependence(ttk.Frame):
                             if 'kF' in p:
                                 try: kF_val = float(p.split(':')[1].strip())
                                 except: pass
+                            if 'WeightedDelta' in p:
+                                try: weighted_delta = float(p.split(':')[1].strip())
+                                except: weighted_delta = None
+                            if 'WeightedErr' in p:
+                                try: weighted_err = float(p.split(':')[1].strip())
+                                except: weighted_err = None
+                    else:
+                        weighted_delta = None
+                        weighted_err = None
                 
                 # 如果没读到 T，使用文件名 fallback
                 if T_val is None:
@@ -158,7 +167,8 @@ class Step3_TemperatureDependence(ttk.Frame):
                     'T': T_val, 'kF': kF_val,
                     'k_vals': data[:, 0], 'delta_vals': data[:, 1], 'err_vals': data[:, 2],
                     'gamma_vals': data[:, 3], 'gamma_err_vals': data[:, 4],
-                    'RSS_gap': data[:, 5], 'RSS_met': data[:, 6], 'p_vals': data[:, 7]
+                    'RSS_gap': data[:, 5], 'RSS_met': data[:, 6], 'p_vals': data[:, 7],
+                    'weighted_res': {'delta_best': weighted_delta, 'error_best': weighted_err} if (('weighted_delta' in locals() and weighted_delta is not None) or ('weighted_err' in locals() and weighted_err is not None)) else None
                 })
             
             self.temp_data.sort(key=lambda x: x['T'])
@@ -186,7 +196,8 @@ class Step3_TemperatureDependence(ttk.Frame):
                     'gamma_err_vals': np.array(stats.get('gamma_err', [])),
                     'RSS_gap': np.array(stats.get('RSS_gap', [])),
                     'RSS_met': np.array(stats.get('RSS_met', [])),
-                    'p_vals': np.array(stats.get('p_vals', []))
+                    'p_vals': np.array(stats.get('p_vals', [])),
+                    'weighted_res': res.get('weighted_res', None)
                 })
             self.temp_data.sort(key=lambda x: x['T'])
             self.lbl_status.config(text=f"Loaded {len(self.temp_data)} sets (Memory).", foreground="green")
@@ -239,35 +250,40 @@ class Step3_TemperatureDependence(ttk.Frame):
                 self.Tc_estimate = T
                 gap_closed = True
                 
-            # 2. Dynamic Weighted Method 
-            # --- For Delta ---
-            lb_d = sp_delta - err_mult * sp_err
-            ub_d = sp_delta + err_mult * sp_err
-            
-            left_d = target_idx
-            while left_d > 0 and lb_d <= item['delta_vals'][left_d-1] <= ub_d: left_d -= 1
-            right_d = target_idx
-            while right_d < len(k_vals)-1 and lb_d <= item['delta_vals'][right_d+1] <= ub_d: right_d += 1
-            
-            valid_idx_d = list(range(left_d, right_d+1))
-            w_d = 1.0 / (item['err_vals'][valid_idx_d]**2 + 1e-15)
-            w_delta = np.sum(w_d * item['delta_vals'][valid_idx_d]) / np.sum(w_d)
-            w_err = np.sqrt(1.0 / np.sum(w_d))
+            # 2. Dynamic Weighted Method (prefer Step 2's precomputed weighted result when available)
+            weighted = item.get('weighted_res', None)
+            if weighted is not None and weighted.get('delta_best', None) is not None:
+                w_delta = weighted.get('delta_best')
+                w_err = weighted.get('error_best')
+            else:
+                # --- For Delta ---
+                lb_d = sp_delta - err_mult * sp_err
+                ub_d = sp_delta + err_mult * sp_err
 
-            # --- For Gamma ---
+                left_d = target_idx
+                while left_d > 0 and lb_d <= item['delta_vals'][left_d-1] <= ub_d: left_d -= 1
+                right_d = target_idx
+                while right_d < len(k_vals)-1 and lb_d <= item['delta_vals'][right_d+1] <= ub_d: right_d += 1
+
+                valid_idx_d = list(range(left_d, right_d+1))
+                w_d = 1.0 / (item['err_vals'][valid_idx_d]**2 + 1e-15)
+                w_delta = np.sum(w_d * item['delta_vals'][valid_idx_d]) / np.sum(w_d)
+                w_err = np.sqrt(1.0 / np.sum(w_d))
+
+            # --- For Gamma (still computed here) ---
             lb_g = sp_gamma - err_mult * sp_g_err
             ub_g = sp_gamma + err_mult * sp_g_err
-            
+
             left_g = target_idx
             while left_g > 0 and lb_g <= item['gamma_vals'][left_g-1] <= ub_g: left_g -= 1
             right_g = target_idx
             while right_g < len(k_vals)-1 and lb_g <= item['gamma_vals'][right_g+1] <= ub_g: right_g += 1
-            
+
             valid_idx_g = list(range(left_g, right_g+1))
             w_g = 1.0 / (item['gamma_err_vals'][valid_idx_g]**2 + 1e-15)
             w_gamma = np.sum(w_g * item['gamma_vals'][valid_idx_g]) / np.sum(w_g)
             w_g_err = np.sqrt(1.0 / np.sum(w_g))
-                
+
             self.extracted_physics.append({
                 'T': T, 'k_target': k_target,
                 'sp_p_val': sp_p_val,
@@ -276,7 +292,8 @@ class Step3_TemperatureDependence(ttk.Frame):
                 'sp_delta': sp_delta, 'sp_err': sp_err,
                 'w_delta': w_delta, 'w_err': w_err,
                 'sp_gamma': sp_gamma, 'sp_g_err': sp_g_err,
-                'w_gamma': w_gamma, 'w_g_err': w_g_err
+                'w_gamma': w_gamma, 'w_g_err': w_g_err,
+                'weighted_res': weighted
             })
             
         self._update_plot()

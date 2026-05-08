@@ -106,6 +106,13 @@ class Step1_BandExtraction(ttk.Frame):
         self.cb_view.current(0)
         self.cb_view.pack(side=tk.LEFT, padx=5)
         self.cb_view.bind("<<ComboboxSelected>>", self._on_display_mode_change)
+        # Ensure radio/check labels look enabled (black) across themes
+        try:
+            style = ttk.Style()
+            style.configure('TRadiobutton', foreground='black')
+            style.configure('TCheckbutton', foreground='black')
+        except Exception:
+            pass
         
         self.fig, self.ax = plt.subplots(figsize=(6, 4.5)) 
         self.divider = make_axes_locatable(self.ax)
