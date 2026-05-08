@@ -52,6 +52,7 @@ class Step1_BandExtraction(ttk.Frame):
         self.show_mode = tk.StringVar(value="Full Raw Spectrum") 
         self.picking_seed = False                  
         self.method_var = tk.StringVar(value="Hybrid") 
+        self.use_shirley_var = tk.BooleanVar(value=True)
         
         self._build_ui()
 
@@ -217,6 +218,11 @@ class Step1_BandExtraction(ttk.Frame):
         
         shirley_frame = ttk.LabelFrame(self.frame_preproc, text="Shirley BG Removal (Wide ROI Crop)", padding=2)
         shirley_frame.pack(fill=tk.X, pady=2)
+        # Optional checkbox to enable/disable Shirley background removal
+        chk_frame = ttk.Frame(shirley_frame)
+        chk_frame.pack(fill=tk.X, pady=(0, 2))
+        self.chk_use_shirley = ttk.Checkbutton(chk_frame, text="Enable Shirley BG removal", variable=self.use_shirley_var)
+        self.chk_use_shirley.pack(side=tk.LEFT)
         s_k_frame = ttk.Frame(shirley_frame); s_k_frame.pack(fill=tk.X, pady=2)
         ttk.Label(s_k_frame, text="Crop Mom. (Å⁻¹):").pack(side=tk.LEFT)
         self.ent_s_k_left = ttk.Entry(s_k_frame, width=5); self.ent_s_k_left.pack(side=tk.LEFT, padx=1); self.ent_s_k_left.insert(0, "-0.15")
@@ -725,6 +731,15 @@ class Step1_BandExtraction(ttk.Frame):
         
         self.k_proc, self.e_proc = self.k_raw[k_mask], self.e_raw[e_mask]
         I_crop = self.I_raw[np.ix_(e_mask, k_mask)].copy()
+        # If user disabled Shirley background removal, skip heavy computation
+        if not getattr(self, 'use_shirley_var', tk.BooleanVar(value=True)).get():
+            self._temp_I_raw_roi = I_crop
+            self._temp_I_bg_total = np.zeros_like(I_crop)
+            self.k_proc, self.e_proc = self.k_raw[k_mask], self.e_raw[e_mask]
+            self.var_shirley_err.set("Skipped")
+            self.var_shirley_err_k.set("-")
+            self._shirley_done(True, 0.0, None)
+            return
         
         self.btn_shirley.config(state=tk.DISABLED, text="Processing...")
         self.var_shirley_err.set("Calculating..."); self.var_shirley_err_k.set("...")

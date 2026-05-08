@@ -45,6 +45,7 @@ class Step2_GapFitting(ttk.Frame):
         self.bg_noise_data = None
         self.alpha_est = 0.0     
         self.noise_data = None   
+        self.use_shirley_var = tk.BooleanVar(value=True)
         
         # SC Fitting Results Storage
         self.kF_actual = None
@@ -214,6 +215,11 @@ class Step2_GapFitting(ttk.Frame):
         
         shirley_frame = ttk.LabelFrame(self.frame_preproc, text="Shirley BG Removal (Wide ROI Crop)", padding=2)
         shirley_frame.pack(fill=tk.X, pady=2)
+        # Optional checkbox to enable/disable Shirley background removal
+        chk_frame = ttk.Frame(shirley_frame)
+        chk_frame.pack(fill=tk.X, pady=(0, 2))
+        self.chk_use_shirley = ttk.Checkbutton(chk_frame, text="Enable Shirley BG removal", variable=self.use_shirley_var)
+        self.chk_use_shirley.pack(side=tk.LEFT)
         s_k_frame = ttk.Frame(shirley_frame); s_k_frame.pack(fill=tk.X, pady=2)
         ttk.Label(s_k_frame, text="Crop Mom. (Å⁻¹):").pack(side=tk.LEFT)
         self.ent_s_k_left = ttk.Entry(s_k_frame, width=5); self.ent_s_k_left.pack(side=tk.LEFT, padx=1); self.ent_s_k_left.insert(0, "-0.15")
@@ -246,7 +252,7 @@ class Step2_GapFitting(ttk.Frame):
         
         self.btn_insp_shirley = ttk.Button(shirley_frame, text="Inspect Shirley Iterations", command=self.open_shirley_inspector, state=tk.DISABLED)
         self.btn_insp_shirley.pack(fill=tk.X, pady=2)
-        self.btn_shirley = ttk.Button(shirley_frame, text="Remove Wide Background", command=self.run_shirley_bg, state=tk.DISABLED)
+        self.btn_shirley = ttk.Button(shirley_frame, text="Crop ROI & Remove Background", command=self.run_shirley_bg, state=tk.DISABLED)
         self.btn_shirley.pack(fill=tk.X, pady=2)
         
         err_frame = ttk.Frame(shirley_frame); err_frame.pack(fill=tk.X, pady=2)
@@ -690,6 +696,15 @@ class Step2_GapFitting(ttk.Frame):
         
         self.k_proc, self.e_proc = self.k_raw[k_mask], self.e_raw[e_mask]
         I_crop = self.I_raw[np.ix_(e_mask, k_mask)].copy()
+        # If user disabled Shirley background removal, skip heavy computation
+        if not getattr(self, 'use_shirley_var', tk.BooleanVar(value=True)).get():
+            self._temp_I_raw_roi = I_crop
+            self._temp_I_bg_total = np.zeros_like(I_crop)
+            self.k_proc, self.e_proc = self.k_raw[k_mask], self.e_raw[e_mask]
+            self.var_shirley_err.set("Skipped")
+            self.var_shirley_err_k.set("-")
+            self._shirley_done(True, 0.0, None)
+            return
         
         self.btn_shirley.config(state=tk.DISABLED, text="Processing...")
         threading.Thread(target=self._shirley_thread, args=(I_crop, max_iter, tol, smooth_k_pts), daemon=True).start()
@@ -738,10 +753,10 @@ class Step2_GapFitting(ttk.Frame):
             self.after(0, lambda: self._shirley_done(all_converged, max_err_val, err_k_val))
         except Exception as err:
             self.after(0, lambda: messagebox.showerror("Error", str(err)))
-            self.after(0, lambda: self.btn_shirley.config(state=tk.NORMAL, text="Remove Wide Background"))
+            self.after(0, lambda: self.btn_shirley.config(state=tk.NORMAL, text="Crop ROI & Remove Background"))
 
     def _shirley_done(self, all_converged, max_err, err_k):
-        self.btn_shirley.config(state=tk.NORMAL, text="Remove Wide Background")
+        self.btn_shirley.config(state=tk.NORMAL, text="Crop ROI & Remove Background")
         self.I_raw_roi = self._temp_I_raw_roi
         self.I_shirley_bg = self._temp_I_bg_total
         self.I_proc = np.maximum(self.I_raw_roi - self.I_shirley_bg, 0) 
