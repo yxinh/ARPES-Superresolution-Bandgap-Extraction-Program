@@ -170,6 +170,10 @@ class Step3_TemperatureDependence(ttk.Frame):
                 if data.shape[1] < 8:
                     continue
 
+                # Fix very small or zero p-values that may have been written as 0.0
+                p_col = data[:, 7].astype(float)
+                p_col = np.where(p_col <= 0.0, np.finfo(float).tiny, p_col)
+
                 # Build weighted_res only if all four weighted values are present
                 weighted_res_obj = None
                 if ('weighted_delta' in locals() and weighted_delta is not None and
@@ -187,7 +191,7 @@ class Step3_TemperatureDependence(ttk.Frame):
                     'T': T_val, 'kF': kF_val,
                     'k_vals': data[:, 0], 'delta_vals': data[:, 1], 'err_vals': data[:, 2],
                     'gamma_vals': data[:, 3], 'gamma_err_vals': data[:, 4],
-                    'RSS_gap': data[:, 5], 'RSS_met': data[:, 6], 'p_vals': data[:, 7],
+                    'RSS_gap': data[:, 5], 'RSS_met': data[:, 6], 'p_vals': p_col,
                     'weighted_res': weighted_res_obj
                 })
             
@@ -212,6 +216,11 @@ class Step3_TemperatureDependence(ttk.Frame):
             self.temp_data = []
             for key, res in step2.saved_results.items():
                 stats = res.get('final_stats', {})
+                # Handle p_vals from memory: replace non-positive with tiny positive float
+                p_vals_arr = np.array(stats.get('p_vals', []), dtype=float)
+                if p_vals_arr.size > 0:
+                    p_vals_arr = np.where(p_vals_arr <= 0.0, np.finfo(float).tiny, p_vals_arr)
+
                 self.temp_data.append({
                     'T': res.get('Temperature', 0),
                     'kF': res.get('kF', None),  # 直接从内存加载保存的 kF
@@ -222,7 +231,7 @@ class Step3_TemperatureDependence(ttk.Frame):
                     'gamma_err_vals': np.array(stats.get('gamma_err', [])),
                     'RSS_gap': np.array(stats.get('RSS_gap', [])),
                     'RSS_met': np.array(stats.get('RSS_met', [])),
-                    'p_vals': np.array(stats.get('p_vals', [])),
+                    'p_vals': p_vals_arr,
                     'weighted_res': res.get('weighted_res', None)
                 })
             # If any memory entries lack weighted_res or required keys, prompt Format Error
@@ -336,8 +345,9 @@ class Step3_TemperatureDependence(ttk.Frame):
             self._set_scientific_style(ax)
 
         elif mode == "P-value vs T":
-            p_vals = [p['sp_p_val'] for p in self.extracted_physics]
-            log_p = np.log10(np.clip(p_vals, 1e-15, 1))
+            p_vals = np.array([p['sp_p_val'] for p in self.extracted_physics], dtype=float)
+            min_pos = np.finfo(float).tiny
+            log_p = np.log10(np.clip(p_vals, min_pos, 1.0))
             
             ax.plot(T_arr, log_p, '-D', color=[0.3, 0, 0.5], markerfacecolor=[0.3, 0, 0.5], 
                      linewidth=1.8, markersize=8)

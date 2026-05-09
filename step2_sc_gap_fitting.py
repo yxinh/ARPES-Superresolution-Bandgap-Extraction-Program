@@ -963,8 +963,22 @@ class Step2_GapFitting(ttk.Frame):
             self.I_diff = self.I_recon_gap_plus_bg - self.I_fit_raw
             
             n_points = len(self.fit_e_vals)
-            f_stats = np.maximum(((RSS_met - RSS_gap) / 1) / (RSS_gap / (n_points - 3)), 0)
-            p_vals = stats.f.sf(f_stats, 1, n_points - 3)
+            # Degrees of freedom
+            P_gap = 3
+            df1 = 1
+            df2 = max(1, n_points - P_gap)
+
+            # Avoid division by zero in denominator (RSS_gap/df2)
+            denom = RSS_gap / df2
+            eps = np.finfo(float).eps
+            denom = np.where(denom <= 0, eps, denom)
+
+            f_stats = ((RSS_met - RSS_gap) / df1) / denom
+            f_stats = np.maximum(f_stats, 0.0)
+
+            # Survival function (upper tail) of F-distribution
+            p_vals = stats.f.sf(f_stats, df1, df2)
+            p_vals = np.clip(p_vals, 0.0, 1.0)
             
             self.final_stats = {
                 'delta_fit': delta_fit, 'delta_err': delta_err,
@@ -1672,7 +1686,7 @@ class Step2_GapFitting(ttk.Frame):
                     "k_vals\tdelta_fit\tdelta_err\tgamma_fit\tgamma_err\tRSS_gap\tRSS_met\tp_vals"
                 )
 
-                np.savetxt(file_path, export_data, header=header_str, comments='', delimiter='\t', fmt='%.8e')
+                np.savetxt(file_path, export_data, header=header_str, comments='', delimiter='\t', fmt='%.12e')
                 
             messagebox.showinfo("Success", f"Successfully exported {len(self.saved_results)} files to:\n{export_dir}")
             
