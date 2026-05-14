@@ -334,15 +334,15 @@ class Step2_GapFitting(ttk.Frame):
         self.ent_err_mult.pack(side=tk.LEFT, padx=5)
         self.ent_err_mult.insert(0, "1.5")
 
-        # Keep Max Err Ratio on a separate row to avoid UI overlap
-        ratio_f = ttk.Frame(ext_f); ratio_f.pack(fill=tk.X, pady=1)
-        ttk.Label(ratio_f, text="Max Err Ratio (kF*x):").pack(side=tk.LEFT)
-        self.ent_err_ratio = ttk.Entry(ratio_f, width=5)
-        self.ent_err_ratio.pack(side=tk.LEFT, padx=5)
-        self.ent_err_ratio.insert(0, "1.5")
+        # Upper bound on fitted Δ uncertainty = (min err over all fitted k) × multiplier
+        cap_f = ttk.Frame(ext_f); cap_f.pack(fill=tk.X, pady=1)
+        ttk.Label(cap_f, text="Δ err cap (× min err @ valid k):").pack(side=tk.LEFT)
+        self.ent_delta_err_cap_mult = ttk.Entry(cap_f, width=5)
+        self.ent_delta_err_cap_mult.pack(side=tk.LEFT, padx=5)
+        self.ent_delta_err_cap_mult.insert(0, "3.0")
 
         # Bind updates to both entries so plot refreshes when values change
-        for ent in (self.ent_err_mult, self.ent_err_ratio):
+        for ent in (self.ent_err_mult, self.ent_delta_err_cap_mult):
             ent.bind("<Return>", lambda e: self._on_display_mode_change())
             ent.bind("<FocusOut>", lambda e: self._on_display_mode_change())
         
@@ -896,6 +896,8 @@ class Step2_GapFitting(ttk.Frame):
             delta_fit, gamma_fit = np.zeros(N_k), np.zeros(N_k)
             delta_err, gamma_err = np.zeros(N_k), np.zeros(N_k)
             RSS_gap, RSS_met = np.zeros(N_k), np.zeros(N_k)
+            gap_fit_ok = np.zeros(N_k, dtype=bool)
+            delta_point_valid = np.zeros(N_k, dtype=bool)
             
             self.fit_k_points = []
             self.fit_results_gap = []
@@ -913,7 +915,7 @@ class Step2_GapFitting(ttk.Frame):
                 I_edc = self.I_fit_proc[:, a]
                 
                 sigma_arr = np.sqrt(np.abs(I_ori) * self.alpha_est**2 + self.bg_noise_val + 1e-12)
-                
+
                 try:
                     popt_1, pcov_1 = curve_fit(
                         lambda e, d, g, s: self.calc_spectrum(e, d, g, s, edc_k, spline_func),
@@ -923,14 +925,23 @@ class Step2_GapFitting(ttk.Frame):
                         sigma=sigma_arr, absolute_sigma=True
                     )
                     flag_1 = False
+                    gap_fit_ok[a] = True
                 except RuntimeError:
                     popt_1, pcov_1 = [0, 0, 0], np.full((3, 3), np.inf)
                     flag_1 = True
+                    gap_fit_ok[a] = False
                 
                 if not flag_1: last_1 = popt_1.copy()
                 delta_fit[a], gamma_fit[a] = popt_1[0], popt_1[1]
                 ci95_1 = 1.96 * np.sqrt(np.diag(pcov_1))
                 delta_err[a], gamma_err[a] = ci95_1[0], ci95_1[1]
+                # Invalid when gap fit failed or Δ is smaller than its own fit uncertainty
+                delta_point_valid[a] = bool(
+                    gap_fit_ok[a]
+                    and np.isfinite(delta_fit[a])
+                    and np.isfinite(delta_err[a]) and (delta_err[a] > 0)
+                    and (delta_fit[a] >= delta_err[a])
+                )
                 I_fit_gap = self.calc_spectrum(self.fit_e_vals, *popt_1, edc_k, spline_func)
                 RSS_gap[a] = np.sum(((I_edc - I_fit_gap) / sigma_arr)**2)
                 
@@ -983,7 +994,8 @@ class Step2_GapFitting(ttk.Frame):
             self.final_stats = {
                 'delta_fit': delta_fit, 'delta_err': delta_err,
                 'gamma_fit': gamma_fit, 'gamma_err': gamma_err,
-                'RSS_gap': RSS_gap, 'RSS_met': RSS_met, 'p_vals': p_vals
+                'RSS_gap': RSS_gap, 'RSS_met': RSS_met, 'p_vals': p_vals,
+                'delta_point_valid': delta_point_valid,
             }
             
             self.after(0, self._fitting_done)
@@ -1017,6 +1029,21 @@ class Step2_GapFitting(ttk.Frame):
         self._update_plot()
 
     # =============================================================================
+    # --- Helper: momentum points used in Δ plots & inverse-variance averaging ---
+    # =============================================================================
+    def _delta_point_valid_mask(self):
+        if not self.final_stats or not self.fit_k_points:
+            return None
+        m = self.final_stats.get('delta_point_valid')
+        n = len(self.fit_k_points)
+        if m is None:
+            return np.ones(n, dtype=bool)
+        m = np.asarray(m, dtype=bool)
+        if m.size != n:
+            return np.ones(n, dtype=bool)
+        return m
+
+    # =============================================================================
     # --- Helper: Calculate Weighted Delta ---
     # =============================================================================
     def _get_weighted_delta(self):
@@ -1028,6 +1055,13 @@ class Step2_GapFitting(ttk.Frame):
         err_vals = np.array(self.final_stats['delta_err'])
         gamma_vals = np.array(self.final_stats.get('gamma_fit', []))
         gamma_errs = np.array(self.final_stats.get('gamma_err', []))
+        if gamma_vals.size != len(k_vals):
+            gamma_vals = np.full(len(k_vals), np.nan)
+        if gamma_errs.size != len(k_vals):
+            gamma_errs = np.full(len(k_vals), np.nan)
+        valid_k = self._delta_point_valid_mask()
+        if valid_k is None:
+            return None
 
         # Determine kF and its index / uncertainty
         if self.kF_actual is not None:
@@ -1036,8 +1070,11 @@ class Step2_GapFitting(ttk.Frame):
             kF = (np.min(k_vals) + np.max(k_vals)) / 2.0
 
         kf_idx = np.argmin(np.abs(k_vals - kF))
-        kf_err = err_vals[kf_idx] if (0 <= kf_idx < len(err_vals)) else np.nan
-        kf_delta = delta_vals[kf_idx] if (0 <= kf_idx < len(delta_vals)) else np.nan
+        if 0 <= kf_idx < len(err_vals) and valid_k[kf_idx]:
+            kf_err = err_vals[kf_idx]
+            kf_delta = delta_vals[kf_idx]
+        else:
+            kf_err, kf_delta = np.nan, np.nan
 
         try:
             N_mult = float(self.ent_err_mult.get())
@@ -1045,42 +1082,64 @@ class Step2_GapFitting(ttk.Frame):
             N_mult = 2.0
 
         try:
-            max_err_ratio = float(self.ent_err_ratio.get())
+            cap_mult = float(self.ent_delta_err_cap_mult.get())
         except Exception:
-            max_err_ratio = 1.5
+            cap_mult = 3.0
+
+        vk = np.asarray(valid_k, dtype=bool)
+        finite_pos = err_vals[vk & np.isfinite(err_vals) & (err_vals > 0)]
+        if finite_pos.size > 0:
+            err_min_all = float(np.min(finite_pos))
+        else:
+            err_min_all = np.nan
+        if cap_mult > 0 and np.isfinite(err_min_all) and err_min_all > 0:
+            max_err_ev = err_min_all * cap_mult
+        else:
+            max_err_ev = np.inf
 
         best_result = None
         best_error = np.inf
 
         # For each momentum point, perform left/right exploration centered at that point
         for i in range(len(k_vals)):
+            if not valid_k[i]:
+                continue
             err_i = err_vals[i]
             if not np.isfinite(err_i) or err_i <= 0:
                 continue
 
-            # Exclude centers whose uncertainty is too large compared to kF
-            if np.isfinite(kf_err) and kf_err > 0:
-                if err_i > kf_err * max_err_ratio:
-                    continue
+            if err_i > max_err_ev:
+                continue
 
             delta_i = delta_vals[i]
             lower_bound = delta_i - N_mult * err_i
             upper_bound = delta_i + N_mult * err_i
 
             left_idx = i
-            while left_idx > 0 and lower_bound <= delta_vals[left_idx - 1] <= upper_bound:
-                left_idx -= 1
+            while left_idx > 0:
+                nxt = left_idx - 1
+                if not valid_k[nxt]:
+                    break
+                if not (lower_bound <= delta_vals[nxt] <= upper_bound):
+                    break
+                left_idx = nxt
 
             right_idx = i
-            while right_idx < len(k_vals) - 1 and lower_bound <= delta_vals[right_idx + 1] <= upper_bound:
-                right_idx += 1
+            while right_idx < len(k_vals) - 1:
+                nxt = right_idx + 1
+                if not valid_k[nxt]:
+                    break
+                if not (lower_bound <= delta_vals[nxt] <= upper_bound):
+                    break
+                right_idx = nxt
 
             sel_idx = slice(left_idx, right_idx + 1)
             sel_delta = delta_vals[sel_idx]
             sel_err = err_vals[sel_idx]
             sel_k = k_vals[sel_idx]
+            sel_valid = valid_k[sel_idx]
 
-            valid_mask = np.isfinite(sel_err) & (sel_err > 0)
+            valid_mask = sel_valid & np.isfinite(sel_err) & (sel_err > 0)
             if not np.any(valid_mask):
                 continue
 
@@ -1130,27 +1189,51 @@ class Step2_GapFitting(ttk.Frame):
                     'chi2_nu': chi2_nu
                 }
 
-        # If none found (rare), fall back to original kF-centered behavior
+        # If none found, fall back to kF-centered behavior using valid points only
         if best_result is None:
-            mid_idx = kf_idx if (0 <= kf_idx < len(k_vals)) else np.argmin(np.abs(k_vals - kF))
+            valid_idx = np.where(valid_k)[0]
+            if valid_idx.size == 0:
+                return None
+            mid_idx = int(valid_idx[np.argmin(np.abs(k_vals[valid_idx] - kF))])
+
             delta_mid = delta_vals[mid_idx]
             err_mid = err_vals[mid_idx]
+            if not np.isfinite(err_mid) or err_mid <= 0:
+                return None
 
             lower_bound = delta_mid - N_mult * err_mid
             upper_bound = delta_mid + N_mult * err_mid
 
             left_idx = mid_idx
-            while left_idx > 0 and lower_bound <= delta_vals[left_idx - 1] <= upper_bound:
-                left_idx -= 1
+            while left_idx > 0:
+                nxt = left_idx - 1
+                if not valid_k[nxt]:
+                    break
+                if not (lower_bound <= delta_vals[nxt] <= upper_bound):
+                    break
+                left_idx = nxt
 
             right_idx = mid_idx
-            while right_idx < len(k_vals) - 1 and lower_bound <= delta_vals[right_idx + 1] <= upper_bound:
-                right_idx += 1
+            while right_idx < len(k_vals) - 1:
+                nxt = right_idx + 1
+                if not valid_k[nxt]:
+                    break
+                if not (lower_bound <= delta_vals[nxt] <= upper_bound):
+                    break
+                right_idx = nxt
 
             sel_idx = slice(left_idx, right_idx + 1)
             sel_k = k_vals[sel_idx]
             sel_delta = delta_vals[sel_idx]
             sel_err = err_vals[sel_idx]
+            sel_valid = valid_k[sel_idx]
+            valid_mask = sel_valid & np.isfinite(sel_err) & (sel_err > 0)
+            if not np.any(valid_mask):
+                return None
+
+            sel_k = sel_k[valid_mask]
+            sel_delta = sel_delta[valid_mask]
+            sel_err = sel_err[valid_mask]
 
             weights = 1.0 / (sel_err**2 + 1e-12)
             delta_best = np.sum(weights * sel_delta) / np.sum(weights)
@@ -1159,8 +1242,8 @@ class Step2_GapFitting(ttk.Frame):
             chi2_nu = np.sum(((sel_delta - delta_best) / sel_err)**2) / dof if dof > 0 else 0.0
 
             # compute gamma weighted similarly for fallback
-            sel_gamma_fb = gamma_vals[sel_idx]
-            sel_gamma_err_fb = gamma_errs[sel_idx]
+            sel_gamma_fb = gamma_vals[sel_idx][valid_mask]
+            sel_gamma_err_fb = gamma_errs[sel_idx][valid_mask]
             gamma_best_fb, gamma_err_fb = np.nan, np.nan
             if sel_gamma_fb.size > 0:
                 valid_g_mask_fb = np.isfinite(sel_gamma_err_fb) & (sel_gamma_err_fb > 0)
@@ -1285,6 +1368,8 @@ class Step2_GapFitting(ttk.Frame):
             
             ax = self.fig.add_subplot(111)
             k_vals = np.array(self.fit_k_points)
+            valid_k = self._delta_point_valid_mask()
+            if valid_k is None: return
             
             w_res = self._get_weighted_delta()
             if w_res is None: return
@@ -1305,7 +1390,8 @@ class Step2_GapFitting(ttk.Frame):
             
             ax.axvspan(sel_k[0], sel_k[-1], color='lightgray', alpha=0.5, lw=0)
             
-            ax.errorbar(k_vals, delta_vals_meV, yerr=err_vals_meV, fmt='o', color='C0', mfc='C0', mec='C0', markersize=6, capsize=4, capthick=1.5, label=r"Fitted $\Delta$")
+            if np.any(valid_k):
+                ax.errorbar(k_vals[valid_k], delta_vals_meV[valid_k], yerr=err_vals_meV[valid_k], fmt='o', color='C0', mfc='C0', mec='C0', markersize=6, capsize=4, capthick=1.5, label=r"Fitted $\Delta$")
             ax.axvline(kF, color='k', linestyle='--', linewidth=1.5, label=fr"$k_F = {kF:.3f}$")
             ax.axhline(delta_best * 1000, color='C1', linestyle='-.', linewidth=2, label=r"Weighted $\Delta_{best}$")
             
@@ -1314,7 +1400,8 @@ class Step2_GapFitting(ttk.Frame):
             ax.set_ylabel(r'Fitted $\Delta$ (meV)', fontsize=14)
             
             ax2 = ax.twinx()
-            ax2.plot(k_vals, err_vals_meV, 'r-', linewidth=2, label="Error")
+            if np.any(valid_k):
+                ax2.plot(k_vals[valid_k], err_vals_meV[valid_k], 'r-', linewidth=2, label="Error")
             ax2.set_ylabel(r'Error $\Delta$ (meV)', fontsize=14, color='r')
             ax2.tick_params(direction='in', length=6, width=1.5, colors='r', right=True, labelsize=12)
             for spine in ax2.spines.values(): spine.set_linewidth(1.5)
@@ -1340,7 +1427,13 @@ class Step2_GapFitting(ttk.Frame):
 
         elif mode == "Fitted Gamma (Γ)":
             ax = self.fig.add_subplot(111)
-            ax.errorbar(self.fit_k_points, self.final_stats['gamma_fit'], yerr=self.final_stats['gamma_err'], fmt='s', color='green', markersize=6, capsize=4, capthick=1.5, label=r"Fitted $\Gamma$")
+            valid_k = self._delta_point_valid_mask()
+            if valid_k is None: return
+            k_pts = np.array(self.fit_k_points)
+            g = np.asarray(self.final_stats['gamma_fit'], dtype=float)
+            ge = np.asarray(self.final_stats['gamma_err'], dtype=float)
+            if np.any(valid_k):
+                ax.errorbar(k_pts[valid_k], g[valid_k], yerr=ge[valid_k], fmt='s', color='green', markersize=6, capsize=4, capthick=1.5, label=r"Fitted $\Gamma$")
             
             if self.kF_actual is not None:
                 ax.axvline(self.kF_actual, color='k', linestyle='--', linewidth=1.5, label=fr"$k_F = {self.kF_actual:.3f}$")
@@ -1357,9 +1450,18 @@ class Step2_GapFitting(ttk.Frame):
 
         elif mode == "F-Test: RSS Comparison":
             ax = self.fig.add_subplot(111)
-            k_pts = self.fit_k_points
-            ax.plot(k_pts, self.final_stats['RSS_gap'], 'o-', color='blue', linewidth=2, markersize=6, label=r'Gap Model ($\Delta$ free)')
-            ax.plot(k_pts, self.final_stats['RSS_met'], 's--', color='red', linewidth=2, markersize=6, label=r'Metal Model ($\Delta=0$)')
+            valid_k = self._delta_point_valid_mask()
+            if valid_k is None:
+                return
+            k_all = np.asarray(self.fit_k_points, dtype=float)
+            rss_g = np.asarray(self.final_stats['RSS_gap'], dtype=float)
+            rss_m = np.asarray(self.final_stats['RSS_met'], dtype=float)
+            vk = np.asarray(valid_k, dtype=bool)
+            if np.any(vk):
+                order = np.argsort(k_all[vk])
+                k_sel = k_all[vk][order]
+                ax.plot(k_sel, rss_g[vk][order], 'o-', color='blue', linewidth=2, markersize=6, label=r'Gap Model ($\Delta$ free)')
+                ax.plot(k_sel, rss_m[vk][order], 's--', color='red', linewidth=2, markersize=6, label=r'Metal Model ($\Delta=0$)')
             
             if self.kF_actual is not None:
                 ax.axvline(self.kF_actual, color='k', linestyle='--', linewidth=1.5, label=fr"$k_F = {self.kF_actual:.3f}$")
@@ -1375,21 +1477,30 @@ class Step2_GapFitting(ttk.Frame):
 
         elif mode == "F-Test: P-Value":
             ax = self.fig.add_subplot(111)
-            k_pts = self.fit_k_points
+            valid_k = self._delta_point_valid_mask()
+            if valid_k is None:
+                return
+            k_all = np.asarray(self.fit_k_points, dtype=float)
+            p_all = np.asarray(self.final_stats['p_vals'], dtype=float)
+            vk = np.asarray(valid_k, dtype=bool)
             
             try: p_min = float(self.ent_lim_p_min.get())
             except ValueError: p_min = 1e-10
             try: thresh = float(self.ent_p_thresh.get())
             except ValueError: thresh = 0.01
             
-            ax.semilogy(k_pts, self.final_stats['p_vals'], 'mD-', markersize=7, linewidth=2, label='F-test P-value')
+            if np.any(vk):
+                order = np.argsort(k_all[vk])
+                k_sel = k_all[vk][order]
+                p_sel = np.clip(p_all[vk][order], np.finfo(float).tiny, 1.0)
+                ax.semilogy(k_sel, p_sel, 'mD-', markersize=7, linewidth=2, label='F-test P-value')
             ax.axhline(y=thresh, color='black', linestyle='--', linewidth=2, label=f'Threshold ({thresh})')
             
             if self.kF_actual is not None:
                 ax.axvline(self.kF_actual, color='k', linestyle='--', linewidth=1.5, label=fr"$k_F = {self.kF_actual:.3f}$")
                 
-            ax.fill_between(k_pts, p_min, thresh, color='green', alpha=0.1, label='Gap Significant')
-            ax.fill_between(k_pts, thresh, 1.5, color='red', alpha=0.1, label='Gap Not Significant')
+            ax.fill_between(k_all, p_min, thresh, color='green', alpha=0.1, label='Gap Significant')
+            ax.fill_between(k_all, thresh, 1.5, color='red', alpha=0.1, label='Gap Not Significant')
             ax.set_ylim(bottom=p_min, top=1.5)
             
             self._set_scientific_style(ax)
@@ -1576,7 +1687,12 @@ class Step2_GapFitting(ttk.Frame):
             if not ans: return
             
         w_res = self._get_weighted_delta()
-        if w_res is None: return messagebox.showerror("Error", "Could not calculate weighted delta.")
+        if w_res is None:
+            return messagebox.showerror(
+                "Error",
+                "Could not calculate weighted Δ: no momentum points pass the validity filter "
+                "(successful gap fit, Δ ≥ fit uncertainty, and within min(err among valid k)×cap).",
+            )
         
         self.saved_results[key] = {
             'filename': filename,
@@ -1659,10 +1775,18 @@ class Step2_GapFitting(ttk.Frame):
                 filename = f"fit_results_{T_val}K.txt"
                 file_path = os.path.join(export_dir, filename)
                 
+                dpv = stats.get('delta_point_valid')
+                if dpv is None:
+                    dpv_col = np.ones(n_pts, dtype=float)
+                else:
+                    dpv_col = np.asarray(dpv, dtype=float).ravel()
+                    if dpv_col.size != n_pts:
+                        dpv_col = np.ones(n_pts, dtype=float)
+
                 # 4. Construct the data matrix
-                # Step 3 expects: 0:k, 1:delta, 2:err, 3:gamma, 4:gamma_err, 5:RSS_gap, 6:RSS_met, 7:p_val
+                # Step 3 expects: 0:k, 1:delta, 2:err, 3:gamma, 4:gamma_err, 5:RSS_gap, 6:RSS_met, 7:p_val [, 8:delta_point_valid]
                 export_data = np.column_stack((
-                    k_vals, delta_vals, err_vals, gamma_vals, gamma_err_vals, rss_gap, rss_met, p_vals
+                    k_vals, delta_vals, err_vals, gamma_vals, gamma_err_vals, rss_gap, rss_met, p_vals, dpv_col,
                 ))
                 
                 # 5. Write file with a 4-line header (updated column names)
@@ -1678,12 +1802,21 @@ class Step2_GapFitting(ttk.Frame):
                     w_gamma = np.nan
                     w_g_err = np.nan
 
+                header_line2 = (
+                    f"Temperature: {T_val} K, kF: {kF_str}, WeightedDelta: {w_delta:.8e}, WeightedErr: {w_err:.8e}, "
+                    f"WeightedGamma: {w_gamma:.8e}, WeightedGammaErr: {w_g_err:.8e}"
+                )
+                if weighted is not None:
+                    sk = weighted.get('sel_k')
+                    if sk is not None and len(np.asarray(sk, dtype=float).ravel()) > 0:
+                        ska = np.asarray(sk, dtype=float).ravel()
+                        header_line2 += ", WeightedSelK: " + ";".join(f"{x:.10e}" for x in ska)
+
                 header_str = (
                     "Exported Fit Results\n" +
-                    f"Temperature: {T_val} K, kF: {kF_str}, WeightedDelta: {w_delta:.8e}, WeightedErr: {w_err:.8e}, "
-                    f"WeightedGamma: {w_gamma:.8e}, WeightedGammaErr: {w_g_err:.8e}\n" +
+                    header_line2 + "\n" +
                     "--------------------------------------------------------------------------------\n" +
-                    "k_vals\tdelta_fit\tdelta_err\tgamma_fit\tgamma_err\tRSS_gap\tRSS_met\tp_vals"
+                    "k_vals\tdelta_fit\tdelta_err\tgamma_fit\tgamma_err\tRSS_gap\tRSS_met\tp_vals\tdelta_point_valid"
                 )
 
                 np.savetxt(file_path, export_data, header=header_str, comments='', delimiter='\t', fmt='%.12e')

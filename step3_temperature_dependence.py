@@ -33,6 +33,15 @@ class Step3_TemperatureDependence(ttk.Frame):
         if self.Tc_estimate is not None and self.Tc_estimate <= T_max:
             ax.axvspan(self.Tc_estimate, T_max + 50, color='gray', alpha=0.3, label='Gapless Region')
 
+    @staticmethod
+    def _finite_sorted_series(T, y, err, mask):
+        """Return (T, y, err) at finite points in mask, sorted by T (avoids NaN gaps in lines)."""
+        idx = np.where(mask)[0]
+        if idx.size == 0:
+            return None, None, None
+        idx = idx[np.argsort(T[idx])]
+        return T[idx], y[idx], err[idx]
+
     # =============================================================================
     # --- UI Building ---
     # =============================================================================
@@ -97,6 +106,13 @@ class Step3_TemperatureDependence(ttk.Frame):
         ttk.Label(f_d, text="to").pack(side=tk.LEFT); 
         self.ent_d_max = ttk.Entry(f_d, width=6); self.ent_d_max.insert(0, "auto"); self.ent_d_max.pack(side=tk.LEFT, padx=1)
 
+        # Right-axis |σ_Δ| limits (Δ vs T dual y-axis)
+        f_sd = ttk.Frame(frame_lim); f_sd.pack(fill=tk.X, pady=2)
+        ttk.Label(f_sd, text="|σ_Δ| (meV):", width=12).pack(side=tk.LEFT)
+        self.ent_sig_d_min = ttk.Entry(f_sd, width=6); self.ent_sig_d_min.insert(0, "auto"); self.ent_sig_d_min.pack(side=tk.LEFT, padx=1)
+        ttk.Label(f_sd, text="to").pack(side=tk.LEFT)
+        self.ent_sig_d_max = ttk.Entry(f_sd, width=6); self.ent_sig_d_max.insert(0, "auto"); self.ent_sig_d_max.pack(side=tk.LEFT, padx=1)
+
         # Gamma limits
         f_g = ttk.Frame(frame_lim); f_g.pack(fill=tk.X, pady=2)
         ttk.Label(f_g, text="Gamma (meV):", width=12).pack(side=tk.LEFT)
@@ -129,6 +145,8 @@ class Step3_TemperatureDependence(ttk.Frame):
                 fpath = os.path.join(folder_path, fname)
                 
                 T_val, kF_val = None, None
+                weighted_delta = weighted_err = weighted_gamma = weighted_gamma_err = None
+                weighted_sel_k = None
                 
                 # 读取并解析文件头部，获取 T 和 kF
                 with open(fpath, 'r') as f:
@@ -137,29 +155,50 @@ class Step3_TemperatureDependence(ttk.Frame):
                     if len(lines) >= 2 and 'Temperature' in lines[1]:
                         parts = [p.strip() for p in lines[1].split(',')]
                         for p in parts:
-                            if 'Temperature' in p:
-                                try: T_val = float(p.split(':')[1].replace('K', '').strip())
-                                except: pass
-                            if 'kF' in p:
-                                try: kF_val = float(p.split(':')[1].strip())
-                                except: pass
-                            if 'WeightedDelta' in p:
-                                try: weighted_delta = float(p.split(':')[1].strip())
-                                except: weighted_delta = None
-                            if 'WeightedErr' in p:
-                                try: weighted_err = float(p.split(':')[1].strip())
-                                except: weighted_err = None
-                            if 'WeightedGamma' in p:
-                                try: weighted_gamma = float(p.split(':')[1].strip())
-                                except: weighted_gamma = None
-                            if 'WeightedGammaErr' in p:
-                                try: weighted_gamma_err = float(p.split(':')[1].strip())
-                                except: weighted_gamma_err = None
+                            if ':' not in p:
+                                continue
+                            key, val = [x.strip() for x in p.split(':', 1)]
+                            if key == 'Temperature':
+                                try:
+                                    T_val = float(val.replace('K', '').strip())
+                                except Exception:
+                                    pass
+                            elif key == 'kF':
+                                try:
+                                    kF_val = float(val)
+                                except Exception:
+                                    pass
+                            elif key == 'WeightedDelta':
+                                try:
+                                    weighted_delta = float(val)
+                                except Exception:
+                                    weighted_delta = None
+                            elif key == 'WeightedErr':
+                                try:
+                                    weighted_err = float(val)
+                                except Exception:
+                                    weighted_err = None
+                            elif key == 'WeightedGamma':
+                                try:
+                                    weighted_gamma = float(val)
+                                except Exception:
+                                    weighted_gamma = None
+                            elif key == 'WeightedGammaErr':
+                                try:
+                                    weighted_gamma_err = float(val)
+                                except Exception:
+                                    weighted_gamma_err = None
+                            elif key == 'WeightedSelK':
+                                try:
+                                    weighted_sel_k = np.array([float(x) for x in val.split(';') if x.strip()])
+                                except Exception:
+                                    weighted_sel_k = None
                     else:
                         weighted_delta = None
                         weighted_err = None
                         weighted_gamma = None
                         weighted_gamma_err = None
+                        weighted_sel_k = None
                 
                 # 如果没读到 T，使用文件名 fallback
                 if T_val is None:
@@ -169,6 +208,12 @@ class Step3_TemperatureDependence(ttk.Frame):
                 data = np.loadtxt(fpath, skiprows=4)
                 if data.shape[1] < 8:
                     continue
+
+                nrows = data.shape[0]
+                if data.shape[1] >= 9:
+                    delta_valid_arr = data[:, 8].astype(float) >= 0.5
+                else:
+                    delta_valid_arr = np.ones(nrows, dtype=bool)
 
                 # Fix very small or zero p-values that may have been written as 0.0
                 p_col = data[:, 7].astype(float)
@@ -186,12 +231,15 @@ class Step3_TemperatureDependence(ttk.Frame):
                         'gamma_best': weighted_gamma,
                         'gamma_err': weighted_gamma_err
                     }
+                    if weighted_sel_k is not None and len(np.asarray(weighted_sel_k, dtype=float).ravel()) > 0:
+                        weighted_res_obj['sel_k'] = np.asarray(weighted_sel_k, dtype=float).ravel()
 
                 self.temp_data.append({
                     'T': T_val, 'kF': kF_val,
                     'k_vals': data[:, 0], 'delta_vals': data[:, 1], 'err_vals': data[:, 2],
                     'gamma_vals': data[:, 3], 'gamma_err_vals': data[:, 4],
                     'RSS_gap': data[:, 5], 'RSS_met': data[:, 6], 'p_vals': p_col,
+                    'delta_valid': delta_valid_arr,
                     'weighted_res': weighted_res_obj
                 })
             
@@ -221,10 +269,19 @@ class Step3_TemperatureDependence(ttk.Frame):
                 if p_vals_arr.size > 0:
                     p_vals_arr = np.where(p_vals_arr <= 0.0, np.finfo(float).tiny, p_vals_arr)
 
+                k_vals_mem = np.array(res.get('k_points', []))
+                dv = stats.get('delta_point_valid')
+                if dv is None:
+                    delta_valid_mem = np.ones(len(k_vals_mem), dtype=bool)
+                else:
+                    delta_valid_mem = np.asarray(dv, dtype=bool).ravel()
+                    if delta_valid_mem.size != len(k_vals_mem):
+                        delta_valid_mem = np.ones(len(k_vals_mem), dtype=bool)
+
                 self.temp_data.append({
                     'T': res.get('Temperature', 0),
                     'kF': res.get('kF', None),  # 直接从内存加载保存的 kF
-                    'k_vals': np.array(res.get('k_points', [])),
+                    'k_vals': k_vals_mem,
                     'delta_vals': np.array(stats.get('delta_fit', [])),
                     'err_vals': np.array(stats.get('delta_err', [])),
                     'gamma_vals': np.array(stats.get('gamma_fit', [])),
@@ -232,6 +289,7 @@ class Step3_TemperatureDependence(ttk.Frame):
                     'RSS_gap': np.array(stats.get('RSS_gap', [])),
                     'RSS_met': np.array(stats.get('RSS_met', [])),
                     'p_vals': p_vals_arr,
+                    'delta_valid': delta_valid_mem,
                     'weighted_res': res.get('weighted_res', None)
                 })
             # If any memory entries lack weighted_res or required keys, prompt Format Error
@@ -251,6 +309,26 @@ class Step3_TemperatureDependence(ttk.Frame):
     # =============================================================================
     # --- Physics Calculation (Single Point & Dynamic Weighted) ---
     # =============================================================================
+    @staticmethod
+    def _rss_mean_on_weighted_k(k_vals, rss_gap, rss_met, weighted):
+        """Mean RSS on momentum points used for inverse-variance Δ (Step 2 ``sel_k``)."""
+        k_vals = np.asarray(k_vals, dtype=float)
+        rss_gap = np.asarray(rss_gap, dtype=float)
+        rss_met = np.asarray(rss_met, dtype=float)
+        if weighted is None or k_vals.size == 0:
+            return float(np.mean(rss_gap)), float(np.mean(rss_met))
+        sel_k = weighted.get('sel_k')
+        if sel_k is None:
+            return float(np.mean(rss_gap)), float(np.mean(rss_met))
+        sel_k = np.asarray(sel_k, dtype=float).ravel()
+        if sel_k.size == 0:
+            return float(np.mean(rss_gap)), float(np.mean(rss_met))
+        idxs = sorted({int(np.argmin(np.abs(k_vals - sk))) for sk in sel_k})
+        if not idxs:
+            return float(np.mean(rss_gap)), float(np.mean(rss_met))
+        ix = np.array(idxs, dtype=int)
+        return float(np.mean(rss_gap[ix])), float(np.mean(rss_met[ix]))
+
     def _calculate_physics(self):
         if not self.temp_data: return
         
@@ -268,6 +346,13 @@ class Step3_TemperatureDependence(ttk.Frame):
             T = item['T']
             kF_val = item['kF']
             k_vals, p_vals = item['k_vals'], item['p_vals']
+            delta_valid = item.get('delta_valid')
+            if delta_valid is None:
+                delta_valid = np.ones(len(k_vals), dtype=bool)
+            else:
+                delta_valid = np.asarray(delta_valid, dtype=bool).ravel()
+                if delta_valid.size != len(k_vals):
+                    delta_valid = np.ones(len(k_vals), dtype=bool)
             
             # Determine Target k 
             if k_ref_str.lower() == 'kf':
@@ -280,15 +365,20 @@ class Step3_TemperatureDependence(ttk.Frame):
                 
             target_idx = np.argmin(np.abs(k_vals - k_target))
             
-            # 1. Single Point Method
-            sp_delta = item['delta_vals'][target_idx]
-            sp_err = item['err_vals'][target_idx]
-            sp_gamma = item['gamma_vals'][target_idx]
-            sp_g_err = item['gamma_err_vals'][target_idx]
+            # P-value at target k: always from full fit (same with/without delta_valid in files)
             sp_p_val = p_vals[target_idx]
+
+            # Single-point Δ / Γ: omit invalid points for those curves only
+            if delta_valid[target_idx]:
+                sp_delta = item['delta_vals'][target_idx]
+                sp_err = item['err_vals'][target_idx]
+                sp_gamma = item['gamma_vals'][target_idx]
+                sp_g_err = item['gamma_err_vals'][target_idx]
+            else:
+                sp_delta = sp_err = sp_gamma = sp_g_err = np.nan
             
-            # Estimate Tc
-            if sp_p_val > p_thresh and not gap_closed:
+            # Estimate Tc (from p-value at target k, independent of Δ validity flag)
+            if np.isfinite(sp_p_val) and sp_p_val > p_thresh and not gap_closed:
                 self.Tc_estimate = T
                 gap_closed = True
                 
@@ -302,11 +392,15 @@ class Step3_TemperatureDependence(ttk.Frame):
             w_gamma = weighted.get('gamma_best')
             w_g_err = weighted.get('gamma_err')
 
+            rss_gap_mean, rss_met_mean = self._rss_mean_on_weighted_k(
+                k_vals, item['RSS_gap'], item['RSS_met'], weighted,
+            )
+
             self.extracted_physics.append({
                 'T': T, 'k_target': k_target,
                 'sp_p_val': sp_p_val,
-                'rss_gap_mean': np.mean(item['RSS_gap']),
-                'rss_met_mean': np.mean(item['RSS_met']),
+                'rss_gap_mean': rss_gap_mean,
+                'rss_met_mean': rss_met_mean,
                 'sp_delta': sp_delta, 'sp_err': sp_err,
                 'w_delta': w_delta, 'w_err': w_err,
                 'sp_gamma': sp_gamma, 'sp_g_err': sp_g_err,
@@ -365,46 +459,93 @@ class Step3_TemperatureDependence(ttk.Frame):
             self._set_scientific_style(ax)
             
         elif mode == "SC Gap (Delta) vs T":
-            sp_d = np.array([p['sp_delta'] for p in self.extracted_physics]) * 1000
-            sp_e = np.array([p['sp_err'] for p in self.extracted_physics]) * 1000
-            w_d = np.array([p['w_delta'] for p in self.extracted_physics]) * 1000
-            w_e = np.array([p['w_err'] for p in self.extracted_physics]) * 1000
-            
-            ax.errorbar(T_arr, sp_d, yerr=sp_e, fmt='-o', color=[0, 0.4470, 0.7410], 
-                        markerfacecolor=[0, 0.4470, 0.7410], markeredgecolor='k',
-                        linewidth=2, capsize=4, label='Single Point (at target $k_F$)')
-            
-            ax.errorbar(T_arr, w_d, yerr=w_e, fmt='--s', color=[0.8500, 0.3250, 0.0980], 
-                        markerfacecolor=[0.8500, 0.3250, 0.0980], markeredgecolor='k',
-                        linewidth=2, capsize=4, label='Inverse-Variance Weighted')
-            
+            sp_d = np.array([p['sp_delta'] for p in self.extracted_physics], dtype=float) * 1000
+            sp_e = np.abs(np.array([p['sp_err'] for p in self.extracted_physics], dtype=float)) * 1000
+            w_d = np.array([p['w_delta'] for p in self.extracted_physics], dtype=float) * 1000
+            w_e = np.abs(np.array([p['w_err'] for p in self.extracted_physics], dtype=float)) * 1000
+
+            m_sp = np.isfinite(sp_d) & np.isfinite(sp_e)
+            m_w = np.isfinite(w_d) & np.isfinite(w_e)
+            T_sp, sp_ds, sp_es = self._finite_sorted_series(T_arr, sp_d, sp_e, m_sp)
+            T_w, w_ds, w_es = self._finite_sorted_series(T_arr, w_d, w_e, m_w)
+
+            c_sp = [0, 0.4470, 0.7410]
+            c_w = [0.8500, 0.3250, 0.0980]
+
+            if T_sp is not None:
+                ax.errorbar(T_sp, sp_ds, yerr=sp_es, fmt='-o', color=c_sp, markerfacecolor=c_sp, markeredgecolor='k',
+                        linewidth=2, capsize=4, capthick=1.5, elinewidth=1.5,
+                        label=r'Single Point $\Delta$ (at target $k$)')
+            if T_w is not None:
+                ax.errorbar(T_w, w_ds, yerr=w_es, fmt='--s', color=c_w, markerfacecolor=c_w, markeredgecolor='k',
+                        linewidth=2, capsize=4, capthick=1.5, elinewidth=1.5,
+                        label=r'Inverse-Variance Weighted $\Delta$')
+
             ax.set_xlabel('Temperature $T$ (K)', fontsize=16)
             ax.set_ylabel(r'Superconducting Gap $\Delta$ (meV)', fontsize=16)
             ax.set_title(r'Temperature Dependence of SC Gap', fontsize=18)
             self._apply_gapless_shading(ax, T_max)
-            ax.legend(loc='best', fontsize=12)
             self._set_scientific_style(ax)
+
+            ax2 = ax.twinx()
+            if T_sp is not None:
+                ax2.plot(T_sp, sp_es, ':o', color=c_sp, alpha=0.9, linewidth=1.8, markersize=6,
+                         markerfacecolor='white', markeredgewidth=1.4, markeredgecolor=c_sp,
+                         label=r'Single Point $|\sigma_\Delta|$')
+            if T_w is not None:
+                ax2.plot(T_w, w_es, ':s', color=c_w, alpha=0.9, linewidth=1.8, markersize=6,
+                         markerfacecolor='white', markeredgewidth=1.4, markeredgecolor=c_w,
+                         label=r'Weighted $|\sigma_\Delta|$')
+            ax2.set_ylabel(r'Absolute uncertainty $|\sigma_\Delta|$ (meV)', fontsize=16, color='dimgray')
+            ax2.tick_params(axis='y', direction='in', length=6, width=1.5, colors='dimgray', labelsize=12)
+            ax2.spines['right'].set_color('dimgray')
+            ax2.spines['right'].set_linewidth(1.5)
+            ax2.grid(False)
+
+            h1, l1 = ax.get_legend_handles_labels()
+            h2, l2 = ax2.get_legend_handles_labels()
+            ax.legend(h1 + h2, l1 + l2, loc='best', fontsize=10)
             
-            # Apply Y Limits
+            # Apply Y Limits (left axis: Δ only)
             try: ymin = float(self.ent_d_min.get()) if self.ent_d_min.get() != 'auto' else None
-            except: ymin = None
+            except Exception: ymin = None
             try: ymax = float(self.ent_d_max.get()) if self.ent_d_max.get() != 'auto' else None
-            except: ymax = None
+            except Exception: ymax = None
             ax.set_ylim(bottom=ymin, top=ymax)
+            try:
+                symin = float(self.ent_sig_d_min.get()) if self.ent_sig_d_min.get().strip() != 'auto' else None
+            except Exception:
+                symin = None
+            try:
+                symax = float(self.ent_sig_d_max.get()) if self.ent_sig_d_max.get().strip() != 'auto' else None
+            except Exception:
+                symax = None
+            ax2.set_ylim(bottom=symin, top=symax)
 
         elif mode == "Gamma vs T":
-            sp_g = np.array([p['sp_gamma'] for p in self.extracted_physics]) * 1000
-            sp_ge = np.array([p['sp_g_err'] for p in self.extracted_physics]) * 1000
-            w_g = np.array([p['w_gamma'] for p in self.extracted_physics]) * 1000
-            w_ge = np.array([p['w_g_err'] for p in self.extracted_physics]) * 1000
-            
-            ax.errorbar(T_arr, sp_g, yerr=sp_ge, fmt='-o', color=[0, 0.4470, 0.7410], 
-                        markerfacecolor=[0, 0.4470, 0.7410], markeredgecolor='k',
-                        linewidth=2, capsize=4, label='Single Point (at target $k_F$)')
-            
-            ax.errorbar(T_arr, w_g, yerr=w_ge, fmt='--s', color=[0.4660, 0.6740, 0.1880], 
-                        markerfacecolor=[0.4660, 0.6740, 0.1880], markeredgecolor='k',
-                        linewidth=2, capsize=4, label='Inverse-Variance Weighted')
+            sp_g = np.array([p['sp_gamma'] for p in self.extracted_physics], dtype=float) * 1000
+            sp_ge = np.abs(np.array([p['sp_g_err'] for p in self.extracted_physics], dtype=float)) * 1000
+            w_g = np.array([p['w_gamma'] for p in self.extracted_physics], dtype=float) * 1000
+            w_ge = np.abs(np.array([p['w_g_err'] for p in self.extracted_physics], dtype=float)) * 1000
+
+            m_sp = np.isfinite(sp_g) & np.isfinite(sp_ge)
+            m_w = np.isfinite(w_g) & np.isfinite(w_ge)
+            T_sp, sp_gs, sp_ges = self._finite_sorted_series(T_arr, sp_g, sp_ge, m_sp)
+            T_w, w_gs, w_ges = self._finite_sorted_series(T_arr, w_g, w_ge, m_w)
+
+            c_sp = [0, 0.4470, 0.7410]
+            c_w = [0.4660, 0.6740, 0.1880]
+
+            if T_sp is not None:
+                ax.errorbar(T_sp, sp_gs, yerr=sp_ges, fmt='-o', color=c_sp,
+                            markerfacecolor=c_sp, markeredgecolor='k',
+                            linewidth=2, capsize=4, capthick=1.5, elinewidth=1.5,
+                            label='Single Point (at target $k$)')
+            if T_w is not None:
+                ax.errorbar(T_w, w_gs, yerr=w_ges, fmt='--s', color=c_w,
+                            markerfacecolor=c_w, markeredgecolor='k',
+                            linewidth=2, capsize=4, capthick=1.5, elinewidth=1.5,
+                            label='Inverse-Variance Weighted')
             
             ax.set_xlabel('Temperature $T$ (K)', fontsize=16)
             ax.set_ylabel(r'Scattering Rate $\Gamma$ (meV)', fontsize=16)
