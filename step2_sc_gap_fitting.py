@@ -1,25 +1,41 @@
+"""Step 2: per-EDC Dynes fits, F-test, and multi-momentum weighted-average (MMWA)."""
+
+import os
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import numpy as np
 import threading
-import sys
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from mpl_toolkits.axes_grid1 import make_axes_locatable 
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy.optimize import curve_fit, root_scalar
-from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.integrate import cumulative_trapezoid
 import scipy.stats as stats
-from scipy.special import expit
 
-# =============================================================================
-# --- Physical Constants and Conversion Factors ---
-# =============================================================================
-KB_CONSTANT = 8.617333262145e-5  # Boltzmann constant in eV/K
-FWHM_TO_SIGMA = 2.3548           
+from arpes_physics import (
+    KB as KB_CONSTANT,
+    FWHM_TO_SIGMA,
+    load_arpes_dat,
+    shirley_background_2d,
+    poisson_scale,
+    intensity_sigma,
+    dynes_photocurrent,
+    mmwa_combine,
+)
+from gui_common import bind_mousewheel, mousewheel_delta
+from prl_plot_style import (
+    apply_style, apply_twinx_style, COLORS, SERIES, PRL_LINEWIDTH, PRL_LINEWIDTH_THICK,
+    PRL_MARKERSIZE, PRL_LABEL_SIZE, PRL_TITLE_SIZE,
+    gui_figsize, legend_kwargs, set_axis_labels, style_colorbar,
+    imshow_intensity, imshow_diverging, add_intensity_colorbar,
+    plot_fit_line_kwargs, plot_data_points_kwargs,
+    errorbar_kwargs, plot_curve_kwargs, shade_region,
+    shade_significant_pvalue, shade_insignificant_pvalue,
+    get_intensity_cmap, get_diverging_cmap,
+)
 
-class Step2_GapFitting(ttk.Frame):
+class Step2GapFitting(ttk.Frame):
     def __init__(self, parent, controller=None, **kwargs):
         super().__init__(parent, **kwargs)
         self.controller = controller 
@@ -62,15 +78,6 @@ class Step2_GapFitting(ttk.Frame):
         self._build_ui()
 
     # =============================================================================
-    # --- Publication Ready Style Helper ---
-    # =============================================================================
-    def _set_scientific_style(self, ax):
-        """Applies publication-quality styling to the given matplotlib axis."""
-        ax.tick_params(direction='in', length=6, width=1.5, colors='k', top=True, right=True, labelsize=12)
-        for spine in ax.spines.values():
-            spine.set_linewidth(1.5)
-
-    # =============================================================================
     # --- UI Construction ---
     # =============================================================================
     def _build_ui(self):
@@ -82,8 +89,7 @@ class Step2_GapFitting(ttk.Frame):
         self.control_frame.bind("<Configure>", lambda e: self.control_canvas.configure(scrollregion=self.control_canvas.bbox("all")))
         self.control_canvas.bind("<Configure>", lambda e: self.control_canvas.itemconfig(self.control_window, width=e.width))
         
-        self.control_canvas.bind('<Enter>', self._bound_to_mousewheel)
-        self.control_canvas.bind('<Leave>', self._unbound_to_mousewheel)
+        bind_mousewheel(self.control_canvas, self._on_mousewheel)
 
         self.control_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
         self.control_scrollbar.pack(side=tk.LEFT, fill=tk.Y)
@@ -108,7 +114,7 @@ class Step2_GapFitting(ttk.Frame):
         except Exception:
             pass
         
-        self.fig = plt.figure(figsize=(7, 5))
+        self.fig = plt.figure(figsize=gui_figsize())
         self.ax = self.fig.add_subplot(111)
         self.divider = make_axes_locatable(self.ax)
         self.cax = self.divider.append_axes("right", size="5%", pad=0.05)
@@ -129,22 +135,8 @@ class Step2_GapFitting(ttk.Frame):
         self._build_step4_fitting()
         self._build_step5_saving()
 
-    def _bound_to_mousewheel(self, event):
-        self.control_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        self.control_canvas.bind_all("<Button-4>", self._on_mousewheel)
-        self.control_canvas.bind_all("<Button-5>", self._on_mousewheel)
-
-    def _unbound_to_mousewheel(self, event):
-        self.control_canvas.unbind_all("<MouseWheel>")
-        self.control_canvas.unbind_all("<Button-4>")
-        self.control_canvas.unbind_all("<Button-5>")
-
     def _on_mousewheel(self, event):
-        if event.num == 4: self.control_canvas.yview_scroll(-1, "units")
-        elif event.num == 5: self.control_canvas.yview_scroll(1, "units")
-        elif event.delta != 0:
-            if sys.platform == "darwin": self.control_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-            else: self.control_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self.control_canvas.yview_scroll(mousewheel_delta(event), "units")
 
     def _build_constants_panel(self):
         frame = tk.Frame(self.control_frame, bg='#e0e0e0', padx=2, pady=2, relief=tk.GROOVE, borderwidth=2)
@@ -245,7 +237,6 @@ class Step2_GapFitting(ttk.Frame):
         ttk.Label(s_param_frame, text="Tol:").pack(side=tk.LEFT, padx=(2,0))
         self.ent_shirley_tol = ttk.Entry(s_param_frame, width=5); self.ent_shirley_tol.pack(side=tk.LEFT, padx=1); self.ent_shirley_tol.insert(0, "1e-9")
         
-        # [RESTORED]: Shirley Smooth k
         ttk.Label(s_param_frame, text="Smooth k (pts):").pack(side=tk.LEFT, padx=(2,0))
         self.ent_shirley_smooth = ttk.Entry(s_param_frame, width=4)
         self.ent_shirley_smooth.pack(side=tk.LEFT, padx=1)
@@ -474,30 +465,7 @@ class Step2_GapFitting(ttk.Frame):
             self.T = float(self.ent_temp.get())
             raw_res = float(self.ent_res.get())
             self.energy_res_sigma = raw_res / FWHM_TO_SIGMA
-            
-            with open(self.file_path, 'r') as f:
-                raw_lines = [line.rstrip('\n') for line in f if line.strip() != '']
-            
-            first_line = raw_lines[0].split('\t')
-            e_vals_temp = np.array([float(x) for x in first_line if x.strip() != ''])
-            k_vals_temp, intensity_temp = [], []
-            for line in raw_lines[1:]:
-                parts = line.split('\t')
-                if len(parts) < 2: continue
-                try: k_vals_temp.append(float(parts[1]))
-                except ValueError: continue
-                row = [float(x) if x.strip() != '' else 0.0 for x in parts[2:]]
-                intensity_temp.append(row)
-                
-            k_vals_temp = np.array(k_vals_temp)
-            I_ex_temp = np.array(intensity_temp, dtype=float).T
-            
-            if k_vals_temp[0] > k_vals_temp[-1]:
-                k_vals_temp, I_ex_temp = k_vals_temp[::-1], I_ex_temp[:, ::-1]
-            if e_vals_temp[0] > e_vals_temp[-1]:
-                e_vals_temp, I_ex_temp = e_vals_temp[::-1], I_ex_temp[::-1, :]
-            
-            self.I_raw, self.k_raw, self.e_raw = I_ex_temp, k_vals_temp, e_vals_temp
+            self.I_raw, self.k_raw, self.e_raw = load_arpes_dat(self.file_path)
             self.I_raw_roi, self.I_shirley_bg, self.I_proc = None, None, None
             
             self.cb_view['values'] = ["Full Raw Spectrum"]
@@ -535,7 +503,7 @@ class Step2_GapFitting(ttk.Frame):
         if self.bg_noise_data is None: return
         k_vals, e_vals_bg, roi = self.bg_noise_data
         top = tk.Toplevel(self.winfo_toplevel()); top.title("Background Noise Region Inspector")
-        fig, ax = plt.subplots(figsize=(6, 4.5))
+        fig, ax = plt.subplots(figsize=gui_figsize())
         
         canvas = FigureCanvasTkAgg(fig, master=top)
         canvas.draw()
@@ -544,10 +512,16 @@ class Step2_GapFitting(ttk.Frame):
         toolbar.pack(side=tk.BOTTOM, fill=tk.X)
         canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        im = ax.imshow(roi, aspect='auto', origin='lower', extent=[k_vals[0], k_vals[-1], e_vals_bg[0]*1000, e_vals_bg[-1]*1000], cmap='inferno')
-        fig.colorbar(im, ax=ax, label='Intensity (a.u.)')
-        ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=12); ax.set_ylabel('Energy E (meV)', fontsize=12)
-        ax.set_title("Background Estimation Region", fontsize=14)
+        im = imshow_intensity(ax, roi, [k_vals[0], k_vals[-1], e_vals_bg[0]*1000, e_vals_bg[-1]*1000])
+        cbar = fig.colorbar(im, ax=ax)
+        style_colorbar(cbar, label='Intensity (a.u.)')
+        set_axis_labels(
+            ax,
+            xlabel=fr'Momentum $k$ ($\mathrm{{\AA}}^{{-1}}$)',
+            ylabel='Energy $E$ (meV)',
+            title='Background Estimation Region',
+        )
+        apply_style(ax)
         fig.tight_layout(); canvas.draw()
 
     def estimate_poisson_level(self):
@@ -559,19 +533,8 @@ class Step2_GapFitting(ttk.Frame):
             e_mask = (self.e_raw >= e_l) & (self.e_raw <= e_r)
             if not np.any(k_mask) or not np.any(e_mask): return messagebox.showwarning("Warning", "Selected ROI is empty!")
             roi = self.I_raw[np.ix_(e_mask, k_mask)]
-            
-            pad_w = int(np.ceil(4 * smooth_sigma))
-            if pad_w > 0:
-                padded_roi = np.pad(roi, pad_width=pad_w, mode='edge')
-                smoothed_padded = gaussian_filter(padded_roi, sigma=smooth_sigma)
-                roi_lp = smoothed_padded[pad_w:-pad_w, pad_w:-pad_w]
-            else:
-                roi_lp = gaussian_filter(roi, sigma=smooth_sigma)
-                
-            residual = roi - roi_lp
-            mean_signal = np.mean(roi_lp[roi_lp > 0]) if roi_lp[roi_lp > 0].size > 0 else 1e-12
-            self.alpha_est = np.sqrt(np.var(residual) / abs(mean_signal) + 1e-12)
-            self.var_alpha.set(f"{self.alpha_est:.5f}") 
+            self.alpha_est, roi_lp, residual = poisson_scale(roi, smooth_sigma)
+            self.var_alpha.set(f"{self.alpha_est:.5f}")
             self.noise_data = (roi, roi_lp, residual, k_mask, e_mask)
             self.btn_insp_noise.config(state=tk.NORMAL) 
         except Exception as e: messagebox.showerror("Noise Est. Error", str(e))
@@ -593,13 +556,19 @@ class Step2_GapFitting(ttk.Frame):
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
             
-            im0 = axes[0].imshow(self.noise_data[0], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='inferno')
-            axes[0].set_title("Original ROI"); fig.colorbar(im0, ax=axes[0])
-            im1 = axes[1].imshow(self.noise_data[1], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='inferno')
-            axes[1].set_title("Smoothed (Signal)"); fig.colorbar(im1, ax=axes[1])
+            ext = [k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000]
+            im0 = imshow_intensity(axes[0], self.noise_data[0], ext)
+            axes[0].set_title("Original ROI", fontsize=PRL_TITLE_SIZE)
+            style_colorbar(fig.colorbar(im0, ax=axes[0]))
+            im1 = imshow_intensity(axes[1], self.noise_data[1], ext)
+            axes[1].set_title("Smoothed (Signal)", fontsize=PRL_TITLE_SIZE)
+            style_colorbar(fig.colorbar(im1, ax=axes[1]))
             std_res = np.std(self.noise_data[2])
-            im2 = axes[2].imshow(self.noise_data[2], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='coolwarm', vmin=-std_res*3, vmax=std_res*3)
-            axes[2].set_title(f"Residual (Noise)\nalpha_est = {self.alpha_est:.4f}"); fig.colorbar(im2, ax=axes[2])
+            im2 = imshow_diverging(axes[2], self.noise_data[2], ext, std_res * 3)
+            axes[2].set_title(f"Residual (Noise)\n$\\alpha_{{est}}$ = {self.alpha_est:.4f}", fontsize=PRL_TITLE_SIZE)
+            style_colorbar(fig.colorbar(im2, ax=axes[2]))
+            for a in axes:
+                apply_style(a)
             
             fig.tight_layout(pad=2.0, w_pad=3.0)
             canvas.draw()
@@ -640,14 +609,12 @@ class Step2_GapFitting(ttk.Frame):
         plot_frame = ttk.Frame(top)
         plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        fig, ax = plt.subplots(figsize=(8, 6))
-        # [FIX 2]: Ensure right space reserved for outer legend
+        fig, ax = plt.subplots(figsize=gui_figsize())
         fig.subplots_adjust(left=0.1, right=0.75, bottom=0.12, top=0.92) 
         
         canvas = FigureCanvasTkAgg(fig, master=plot_frame)
         canvas.draw()
         
-        # [CRITICAL]: Toolbar packed first to BOTTOM to prevent vanishing
         toolbar = NavigationToolbar2Tk(canvas, plot_frame)
         toolbar.update()
         toolbar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -670,30 +637,34 @@ class Step2_GapFitting(ttk.Frame):
             N, I_left, I_right = len(E_sorted), I_sorted[0], I_sorted[-1]
             
             ax.clear(); B = np.linspace(I_left, I_right, N)
-            ax.plot(E_plot, I_sorted, label='Original $I(E)$', color='black', linewidth=2)
+            ax.plot(E_plot, I_sorted, label='Original $I(E)$', **plot_fit_line_kwargs(SERIES["reference"]))
             
             for n in range(max_iter):
                 B_old = np.copy(B); Y = np.maximum(I_sorted - B_old, 0)
                 cum_int = np.zeros(N); cum_int[1:] = cumulative_trapezoid(Y, E_sorted)
                 if cum_int[-1] == 0: break
                 B = I_right + (I_left - I_right) * ((cum_int[-1] - cum_int) / cum_int[-1])
-                if (n + 1) % plot_step == 0: ax.plot(E_plot, B, label=f'Iter {n+1}', alpha=0.8)
+                if (n + 1) % plot_step == 0:
+                    ax.plot(E_plot, B, label=f'Iter {n+1}', color=COLORS['gray'], linestyle='--', linewidth=PRL_LINEWIDTH, alpha=0.7)
                 if np.max(np.abs(B - B_old)) < tol: break
                 
-            ax.plot(E_plot, B, label='Final Shirley BG', color='red', linewidth=2.5)
-            ax.plot(E_plot, np.maximum(I_sorted - B, 1e-4), color='blue', linewidth=2, label='Subtracted Signal')
+            ax.plot(E_plot, B, label='Final Shirley BG', **plot_fit_line_kwargs(SERIES["background"]))
+            ax.plot(E_plot, np.maximum(I_sorted - B, 1e-4), **plot_fit_line_kwargs(SERIES["gap_model"]),
+                     label='Subtracted Signal')
             
-            self._set_scientific_style(ax)
-            ax.set_xlabel('Energy (meV)', fontsize=14)
-            ax.set_ylabel('Intensity (a.u.)', fontsize=14)
-            ax.set_title(fr"Shirley BG Tuning | Momentum = {actual_k:.4f} $\mathrm{{\AA}}^{{-1}}$", fontsize=14)
+            apply_style(ax)
+            set_axis_labels(
+                ax,
+                xlabel='Energy (meV)',
+                ylabel='Intensity (a.u.)',
+                title=fr"Shirley BG Tuning | $k = {actual_k:.4f}$ $\mathrm{{\AA}}^{{-1}}$",
+            )
             
             pad_I = (np.max(I_sorted) - np.min(I_sorted)) * 0.1
             ax.set_xlim(np.min(E_plot), np.max(E_plot))
             ax.set_ylim(0, np.max(I_sorted) + pad_I)
             
-            # [FIX 2]: Legend perfectly mapped to the empty right side created by subplots_adjust
-            ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left", fontsize=10, frameon=True, edgecolor='black')
+            ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left", **legend_kwargs())
             
             canvas.draw()
 
@@ -704,7 +675,7 @@ class Step2_GapFitting(ttk.Frame):
             k_l, k_r = float(self.ent_s_k_left.get()), float(self.ent_s_k_right.get())
             e_l, e_r = float(self.ent_s_e_left.get()), float(self.ent_s_e_right.get())
             max_iter, tol = int(self.ent_shirley_iter.get()), float(self.ent_shirley_tol.get())
-            smooth_k_pts = float(self.ent_shirley_smooth.get())  # [RESTORED]
+            smooth_k_pts = float(self.ent_shirley_smooth.get())
         except ValueError: return messagebox.showerror("Input Error", "Invalid parameters for Shirley!")
         
         k_mask = (self.k_raw >= k_l) & (self.k_raw <= k_r)
@@ -728,44 +699,11 @@ class Step2_GapFitting(ttk.Frame):
 
     def _shirley_thread(self, I_crop, max_iter, tol, smooth_k_pts):
         try:
-            I_bg_total = np.zeros_like(I_crop)
-            all_converged, max_err_val, max_err_k_idx = True, 0.0, -1
-            e = self.e_proc 
-            for j in range(I_crop.shape[1]):
-                y, bg = I_crop[:, j], np.zeros_like(I_crop[:, j])
-                y_min = np.min(y); y_proc = y - y_min
-                converged, last_diff = False, 0.0
-                for _ in range(max_iter):
-                    y_eff = np.maximum(y_proc - bg, 0)
-                    integral = np.zeros_like(y_eff)
-                    for i in range(len(y_eff)-2, -1, -1):
-                        integral[i] = integral[i+1] + 0.5 * (y_eff[i+1] + y_eff[i]) * (e[i+1] - e[i])
-                    if integral[0] == 0: break
-                    new_bg = y_proc[-1] + ((y_proc[0] - y_proc[-1]) / integral[0]) * integral
-                    last_diff = np.max(np.abs(new_bg - bg))
-                    if last_diff < tol:
-                        bg = new_bg; converged = True; break
-                    bg = new_bg
-                    
-                if not converged:
-                    all_converged = False
-                    if last_diff > max_err_val: max_err_val, max_err_k_idx = last_diff, j
-                I_bg_total[:, j] = bg + y_min
-            
-            # [RESTORED]
-            if smooth_k_pts > 0:
-                pad_w = int(np.ceil(4 * smooth_k_pts))
-                if pad_w > 0:
-                    padded_bg = np.pad(I_bg_total, pad_width=((0,0), (pad_w, pad_w)), mode='edge')
-                    smoothed_bg = gaussian_filter1d(padded_bg, sigma=smooth_k_pts, axis=1)
-                    I_bg_total_smoothed = smoothed_bg[:, pad_w:-pad_w]
-                else:
-                    I_bg_total_smoothed = gaussian_filter1d(I_bg_total, sigma=smooth_k_pts, axis=1)
-            else:
-                I_bg_total_smoothed = I_bg_total
-
+            I_bg_total, all_converged, max_err_val, max_err_k_idx = shirley_background_2d(
+                self.e_proc, I_crop, max_iter, tol, smooth_k_pts
+            )
             self._temp_I_raw_roi = I_crop
-            self._temp_I_bg_total = I_bg_total_smoothed    
+            self._temp_I_bg_total = I_bg_total
             err_k_val = self.k_proc[max_err_k_idx] if max_err_k_idx != -1 else None
             self.after(0, lambda: self._shirley_done(all_converged, max_err_val, err_k_val))
         except Exception as err:
@@ -826,37 +764,13 @@ class Step2_GapFitting(ttk.Frame):
             self.btn_fit.config(state=tk.DISABLED)
 
     def calc_spectrum(self, e, delta, gamma, scale, edc_k, spline_func):
-        dE_val = (e[-1] - e[0]) / max(len(e) - 1, 1)
-        abs_dE = abs(dE_val)
-        sigma_pixels = self.energy_res_sigma / abs_dE if abs_dE > 0 else 1.0
-
-        pad_e_val = 4.0 * self.energy_res_sigma
-        pad_n = int(np.ceil(pad_e_val / abs_dE)) if abs_dE > 0 else 0
-
-        if pad_n > 0:
-            e_left = np.array([e[0] - (pad_n - i) * dE_val for i in range(pad_n)])
-            e_right = np.array([e[-1] + (i + 1) * dE_val for i in range(pad_n)])
-            e_ext = np.concatenate((e_left, e, e_right))
-        else:
-            e_ext = e
-
-        ksi_k = spline_func(edc_k)
-        Ek = np.sqrt(ksi_k**2 + delta**2)
-        u_k2 = 0.5 * (1 + ksi_k / Ek)
-        v_k2 = 1.0 - u_k2
-        
-        A_tmp = scale * gamma * (u_k2 / ((e_ext - Ek)**2 + gamma**2) + v_k2 / ((e_ext + Ek)**2 + gamma**2))
-        f_tmp = expit(-e_ext / (KB_CONSTANT * self.T))
-        I_tmp = A_tmp * f_tmp 
-        
-        I_blur_ext = gaussian_filter1d(I_tmp, sigma=sigma_pixels)
-        
-        if pad_n > 0:
-            I_blur = I_blur_ext[pad_n:-pad_n]
-        else:
-            I_blur = I_blur_ext
-            
-        return I_blur
+        """Forward model I(k, omega) at one momentum (kept as the fit callback)."""
+        return dynes_photocurrent(
+            e, delta, gamma, scale,
+            xi_k=float(spline_func(edc_k)),
+            temperature=self.T,
+            energy_res_sigma=self.energy_res_sigma,
+        )
 
     def run_gap_fitting(self):
         self.lbl_fit_status.config(text="Fitting Models in ROI... Please wait", foreground="orange")
@@ -914,7 +828,7 @@ class Step2_GapFitting(ttk.Frame):
                 I_ori = self.I_fit_raw[:, a]
                 I_edc = self.I_fit_proc[:, a]
                 
-                sigma_arr = np.sqrt(np.abs(I_ori) * self.alpha_est**2 + self.bg_noise_val + 1e-12)
+                sigma_arr = intensity_sigma(I_ori, self.alpha_est, self.bg_noise_val)
 
                 try:
                     popt_1, pcov_1 = curve_fit(
@@ -1043,10 +957,8 @@ class Step2_GapFitting(ttk.Frame):
             return np.ones(n, dtype=bool)
         return m
 
-    # =============================================================================
-    # --- Helper: Calculate Weighted Delta ---
-    # =============================================================================
     def _get_weighted_delta(self):
+        """MMWA combination of per-EDC gaps (see ``arpes_physics.mmwa_combine``)."""
         if not self.final_stats:
             return None
 
@@ -1055,224 +967,27 @@ class Step2_GapFitting(ttk.Frame):
         err_vals = np.array(self.final_stats['delta_err'])
         gamma_vals = np.array(self.final_stats.get('gamma_fit', []))
         gamma_errs = np.array(self.final_stats.get('gamma_err', []))
-        if gamma_vals.size != len(k_vals):
-            gamma_vals = np.full(len(k_vals), np.nan)
-        if gamma_errs.size != len(k_vals):
-            gamma_errs = np.full(len(k_vals), np.nan)
         valid_k = self._delta_point_valid_mask()
         if valid_k is None:
             return None
 
-        # Determine kF and its index / uncertainty
-        if self.kF_actual is not None:
-            kF = self.kF_actual
-        else:
-            kF = (np.min(k_vals) + np.max(k_vals)) / 2.0
-
-        kf_idx = np.argmin(np.abs(k_vals - kF))
-        if 0 <= kf_idx < len(err_vals) and valid_k[kf_idx]:
-            kf_err = err_vals[kf_idx]
-            kf_delta = delta_vals[kf_idx]
-        else:
-            kf_err, kf_delta = np.nan, np.nan
-
         try:
-            N_mult = float(self.ent_err_mult.get())
+            n_sigma = float(self.ent_err_mult.get())
         except Exception:
-            N_mult = 2.0
-
+            n_sigma = 2.0
         try:
-            cap_mult = float(self.ent_delta_err_cap_mult.get())
+            err_cap_mult = float(self.ent_delta_err_cap_mult.get())
         except Exception:
-            cap_mult = 3.0
+            err_cap_mult = 3.0
 
-        vk = np.asarray(valid_k, dtype=bool)
-        finite_pos = err_vals[vk & np.isfinite(err_vals) & (err_vals > 0)]
-        if finite_pos.size > 0:
-            err_min_all = float(np.min(finite_pos))
-        else:
-            err_min_all = np.nan
-        if cap_mult > 0 and np.isfinite(err_min_all) and err_min_all > 0:
-            max_err_ev = err_min_all * cap_mult
-        else:
-            max_err_ev = np.inf
-
-        best_result = None
-        best_error = np.inf
-
-        # For each momentum point, perform left/right exploration centered at that point
-        for i in range(len(k_vals)):
-            if not valid_k[i]:
-                continue
-            err_i = err_vals[i]
-            if not np.isfinite(err_i) or err_i <= 0:
-                continue
-
-            if err_i > max_err_ev:
-                continue
-
-            delta_i = delta_vals[i]
-            lower_bound = delta_i - N_mult * err_i
-            upper_bound = delta_i + N_mult * err_i
-
-            left_idx = i
-            while left_idx > 0:
-                nxt = left_idx - 1
-                if not valid_k[nxt]:
-                    break
-                if not (lower_bound <= delta_vals[nxt] <= upper_bound):
-                    break
-                left_idx = nxt
-
-            right_idx = i
-            while right_idx < len(k_vals) - 1:
-                nxt = right_idx + 1
-                if not valid_k[nxt]:
-                    break
-                if not (lower_bound <= delta_vals[nxt] <= upper_bound):
-                    break
-                right_idx = nxt
-
-            sel_idx = slice(left_idx, right_idx + 1)
-            sel_delta = delta_vals[sel_idx]
-            sel_err = err_vals[sel_idx]
-            sel_k = k_vals[sel_idx]
-            sel_valid = valid_k[sel_idx]
-
-            valid_mask = sel_valid & np.isfinite(sel_err) & (sel_err > 0)
-            if not np.any(valid_mask):
-                continue
-
-            sel_delta = sel_delta[valid_mask]
-            sel_err = sel_err[valid_mask]
-            sel_k = sel_k[valid_mask]
-
-            # compute weighted gamma on the same selected indices when possible
-            sel_gamma = gamma_vals[sel_idx]
-            sel_gamma_err = gamma_errs[sel_idx]
-            sel_gamma = sel_gamma[valid_mask]
-            sel_gamma_err = sel_gamma_err[valid_mask]
-
-            gamma_best, gamma_err = np.nan, np.nan
-            if sel_gamma.size > 0:
-                valid_g_mask = np.isfinite(sel_gamma_err) & (sel_gamma_err > 0)
-                if np.any(valid_g_mask):
-                    wg = 1.0 / (sel_gamma_err[valid_g_mask]**2 + 1e-12)
-                    gamma_best = np.sum(wg * sel_gamma[valid_g_mask]) / np.sum(wg)
-                    gamma_err = np.sqrt(1.0 / np.sum(wg))
-
-            weights = 1.0 / (sel_err**2 + 1e-12)
-            delta_best = np.sum(weights * sel_delta) / np.sum(weights)
-            error_best = np.sqrt(1.0 / np.sum(weights))
-
-            dof = len(sel_delta) - 1
-            if dof > 0:
-                chi2_nu = np.sum(((sel_delta - delta_best) / sel_err)**2) / dof
-            else:
-                chi2_nu = 0.0
-
-            # Keep the center that yields minimal combined uncertainty
-            if error_best < best_error:
-                best_error = error_best
-                best_result = {
-                    'kF': kF,
-                    'mid_idx': i,
-                    'delta_mid': delta_i,
-                    'err_mid': err_i,
-                    'sel_k': sel_k,
-                    'sel_delta': sel_delta,
-                    'sel_err': sel_err,
-                    'delta_best': delta_best,
-                    'error_best': error_best,
-                    'gamma_best': gamma_best,
-                    'gamma_err': gamma_err,
-                    'chi2_nu': chi2_nu
-                }
-
-        # If none found, fall back to kF-centered behavior using valid points only
-        if best_result is None:
-            valid_idx = np.where(valid_k)[0]
-            if valid_idx.size == 0:
-                return None
-            mid_idx = int(valid_idx[np.argmin(np.abs(k_vals[valid_idx] - kF))])
-
-            delta_mid = delta_vals[mid_idx]
-            err_mid = err_vals[mid_idx]
-            if not np.isfinite(err_mid) or err_mid <= 0:
-                return None
-
-            lower_bound = delta_mid - N_mult * err_mid
-            upper_bound = delta_mid + N_mult * err_mid
-
-            left_idx = mid_idx
-            while left_idx > 0:
-                nxt = left_idx - 1
-                if not valid_k[nxt]:
-                    break
-                if not (lower_bound <= delta_vals[nxt] <= upper_bound):
-                    break
-                left_idx = nxt
-
-            right_idx = mid_idx
-            while right_idx < len(k_vals) - 1:
-                nxt = right_idx + 1
-                if not valid_k[nxt]:
-                    break
-                if not (lower_bound <= delta_vals[nxt] <= upper_bound):
-                    break
-                right_idx = nxt
-
-            sel_idx = slice(left_idx, right_idx + 1)
-            sel_k = k_vals[sel_idx]
-            sel_delta = delta_vals[sel_idx]
-            sel_err = err_vals[sel_idx]
-            sel_valid = valid_k[sel_idx]
-            valid_mask = sel_valid & np.isfinite(sel_err) & (sel_err > 0)
-            if not np.any(valid_mask):
-                return None
-
-            sel_k = sel_k[valid_mask]
-            sel_delta = sel_delta[valid_mask]
-            sel_err = sel_err[valid_mask]
-
-            weights = 1.0 / (sel_err**2 + 1e-12)
-            delta_best = np.sum(weights * sel_delta) / np.sum(weights)
-            error_best = np.sqrt(1.0 / np.sum(weights))
-            dof = len(sel_delta) - 1
-            chi2_nu = np.sum(((sel_delta - delta_best) / sel_err)**2) / dof if dof > 0 else 0.0
-
-            # compute gamma weighted similarly for fallback
-            sel_gamma_fb = gamma_vals[sel_idx][valid_mask]
-            sel_gamma_err_fb = gamma_errs[sel_idx][valid_mask]
-            gamma_best_fb, gamma_err_fb = np.nan, np.nan
-            if sel_gamma_fb.size > 0:
-                valid_g_mask_fb = np.isfinite(sel_gamma_err_fb) & (sel_gamma_err_fb > 0)
-                if np.any(valid_g_mask_fb):
-                    wg_fb = 1.0 / (sel_gamma_err_fb[valid_g_mask_fb]**2 + 1e-12)
-                    gamma_best_fb = np.sum(wg_fb * sel_gamma_fb[valid_g_mask_fb]) / np.sum(wg_fb)
-                    gamma_err_fb = np.sqrt(1.0 / np.sum(wg_fb))
-
-            best_result = {
-                'kF': kF,
-                'mid_idx': mid_idx,
-                'delta_mid': delta_mid,
-                'err_mid': err_mid,
-                'sel_k': sel_k,
-                'sel_delta': sel_delta,
-                'sel_err': sel_err,
-                'delta_best': delta_best,
-                'error_best': error_best,
-                'gamma_best': gamma_best_fb,
-                'gamma_err': gamma_err_fb,
-                'chi2_nu': chi2_nu
-            }
-
-        # Always include kF-point values in the result
-        if best_result is not None:
-            best_result['delta_kf'] = kf_delta
-            best_result['err_kf'] = kf_err
-
-        return best_result
+        return mmwa_combine(
+            k_vals, delta_vals, err_vals, valid_k,
+            k_f=self.kF_actual,
+            n_sigma=n_sigma,
+            err_cap_mult=err_cap_mult,
+            gamma_vals=gamma_vals,
+            gamma_errs=gamma_errs,
+        )
 
     # =============================================================================
     # --- Plotting & Visualization ---
@@ -1309,7 +1024,7 @@ class Step2_GapFitting(ttk.Frame):
             plot_I, plot_k, plot_e = None, None, None
             title_text = ""
             vmin_global, vmax_global = 0, 1
-            cmap_to_use = 'inferno'
+            cmap_to_use = get_intensity_cmap()
 
             if mode == "Full Raw Spectrum":
                 if self.I_raw is None: return
@@ -1335,7 +1050,7 @@ class Step2_GapFitting(ttk.Frame):
                     plot_I, title_text = self.I_recon_gap_plus_bg, f'Reconstructed Spectrum + Background'
                 elif "Difference" in mode:
                     plot_I, title_text = self.I_diff, f'Fit ROI: Difference (Recon+BG - Raw)'
-                    cmap_to_use = 'coolwarm'
+                    cmap_to_use = get_diverging_cmap()
                     abs_max = np.nanpercentile(np.abs(plot_I), 98) if plot_I is not None else 1.0
                     if abs_max == 0 or np.isnan(abs_max): abs_max = 1e-6
                     vmin_global, vmax_global = -abs_max, abs_max
@@ -1355,12 +1070,15 @@ class Step2_GapFitting(ttk.Frame):
             if plot_I is None: return
 
             extent = [plot_k[0], plot_k[-1], plot_e[0]*1000, plot_e[-1]*1000]
-            im = self.ax.imshow(plot_I, aspect='auto', origin='lower', extent=extent, cmap=cmap_to_use, vmin=vmin_global, vmax=vmax_global)
-            self.fig.colorbar(im, cax=self.cax)
-            self.cax.set_ylabel('Intensity (a.u.)', fontsize=10)
-            self.ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=12)
-            self.ax.set_ylabel('Energy E (meV)', fontsize=12)
-            self.ax.set_title(title_text, fontsize=14)
+            im = imshow_intensity(self.ax, plot_I, extent, vmin=vmin_global, vmax=vmax_global, cmap=cmap_to_use)
+            add_intensity_colorbar(self.fig, im, self.cax)
+            set_axis_labels(
+                self.ax,
+                xlabel=fr'Momentum $k$ ($\mathrm{{\AA}}^{{-1}}$)',
+                ylabel='Energy $E$ (meV)',
+                title=title_text,
+            )
+            apply_style(self.ax)
             self.fig.tight_layout()
 
         elif mode == "Fitted Delta (Δ)":
@@ -1388,23 +1106,30 @@ class Step2_GapFitting(ttk.Frame):
             delta_vals_meV = self.final_stats['delta_fit'] * 1000
             err_vals_meV = self.final_stats['delta_err'] * 1000
             
-            ax.axvspan(sel_k[0], sel_k[-1], color='lightgray', alpha=0.5, lw=0)
+            shade_region(ax, sel_k[0], sel_k[-1])
             
             if np.any(valid_k):
-                ax.errorbar(k_vals[valid_k], delta_vals_meV[valid_k], yerr=err_vals_meV[valid_k], fmt='o', color='C0', mfc='C0', mec='C0', markersize=6, capsize=4, capthick=1.5, label=r"Fitted $\Delta$")
-            ax.axvline(kF, color='k', linestyle='--', linewidth=1.5, label=fr"$k_F = {kF:.3f}$")
-            ax.axhline(delta_best * 1000, color='C1', linestyle='-.', linewidth=2, label=r"Weighted $\Delta_{best}$")
+                ax.errorbar(k_vals[valid_k], delta_vals_meV[valid_k], yerr=err_vals_meV[valid_k],
+                            **errorbar_kwargs(SERIES["gap_model"], marker='o', linestyle='none'),
+                            label=r"Fitted $\Delta$")
+            ax.axvline(kF, color=SERIES["reference"], linestyle='--', linewidth=PRL_LINEWIDTH, label=fr"$k_F = {kF:.3f}$")
+            ax.axhline(delta_best * 1000, color=SERIES["weighted"], linestyle='-.', linewidth=PRL_LINEWIDTH_THICK,
+                       label=r"Weighted $\Delta_{\mathrm{best}}$")
             
-            self._set_scientific_style(ax)
-            ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=14)
-            ax.set_ylabel(r'Fitted $\Delta$ (meV)', fontsize=14)
+            apply_style(ax)
+            set_axis_labels(
+                ax,
+                xlabel=fr'Momentum $k$ ($\mathrm{{\AA}}^{{-1}}$)',
+                ylabel=r'Fitted $\Delta$ (meV)',
+                title='Fitted Superconducting Gap & Averaging',
+            )
             
             ax2 = ax.twinx()
             if np.any(valid_k):
-                ax2.plot(k_vals[valid_k], err_vals_meV[valid_k], 'r-', linewidth=2, label="Error")
-            ax2.set_ylabel(r'Error $\Delta$ (meV)', fontsize=14, color='r')
-            ax2.tick_params(direction='in', length=6, width=1.5, colors='r', right=True, labelsize=12)
-            for spine in ax2.spines.values(): spine.set_linewidth(1.5)
+                ax2.plot(k_vals[valid_k], err_vals_meV[valid_k], color=SERIES["error"],
+                         linestyle='--', linewidth=PRL_LINEWIDTH, label=r"$|\sigma_\Delta|$")
+            ax2.set_ylabel(r'Error $\Delta$ (meV)', fontsize=PRL_LABEL_SIZE, color=SERIES["error"])
+            apply_twinx_style(ax2, color=SERIES["error"])
             
             res_str = (
                 f"Interval: [{sel_k[0]:.3f}, {sel_k[-1]:.3f}]\n"
@@ -1418,11 +1143,8 @@ class Step2_GapFitting(ttk.Frame):
             handles.append(proxy)
             labels.append(res_str)
             
-            ax.legend(handles, labels, loc='best', fontsize=7, frameon=True, edgecolor='black', handlelength=1.2, labelspacing=0.3)
-            
-            ax.set_title("Fitted Superconducting Gap & Averaging", fontsize=14)
-            ax.grid(True, alpha=0.2, linestyle='--')
-            self._apply_axis_limits(ax, 'delta') 
+            ax.legend(handles, labels, loc='best', **legend_kwargs(handlelength=1.2, labelspacing=0.3))
+            self._apply_axis_limits(ax, 'delta')
             self.fig.tight_layout()
 
         elif mode == "Fitted Gamma (Γ)":
@@ -1433,18 +1155,23 @@ class Step2_GapFitting(ttk.Frame):
             g = np.asarray(self.final_stats['gamma_fit'], dtype=float)
             ge = np.asarray(self.final_stats['gamma_err'], dtype=float)
             if np.any(valid_k):
-                ax.errorbar(k_pts[valid_k], g[valid_k], yerr=ge[valid_k], fmt='s', color='green', markersize=6, capsize=4, capthick=1.5, label=r"Fitted $\Gamma$")
+                ax.errorbar(k_pts[valid_k], g[valid_k], yerr=ge[valid_k],
+                            **errorbar_kwargs(SERIES["gamma_weighted"], marker='s', linestyle='none'),
+                            label=r"Fitted $\Gamma$")
             
             if self.kF_actual is not None:
-                ax.axvline(self.kF_actual, color='k', linestyle='--', linewidth=1.5, label=fr"$k_F = {self.kF_actual:.3f}$")
+                ax.axvline(self.kF_actual, color=SERIES["reference"], linestyle='--',
+                           linewidth=PRL_LINEWIDTH, label=fr"$k_F = {self.kF_actual:.3f}$")
                 
-            self._set_scientific_style(ax)
-            ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=14)
-            ax.set_ylabel(r'$\Gamma$ (eV)', fontsize=14)
-            ax.set_title("Fitted Scattering Rate", fontsize=14)
+            apply_style(ax)
+            set_axis_labels(
+                ax,
+                xlabel=fr'Momentum $k$ ($\mathrm{{\AA}}^{{-1}}$)',
+                ylabel=r'$\Gamma$ (eV)',
+                title='Fitted Scattering Rate',
+            )
             
-            ax.legend(loc='best', fontsize=7, frameon=True, edgecolor='black', handlelength=1.2, labelspacing=0.3)
-            ax.grid(True, alpha=0.2, linestyle='--')
+            ax.legend(loc='best', **legend_kwargs(handlelength=1.2, labelspacing=0.3))
             self._apply_axis_limits(ax, 'gamma')
             self.fig.tight_layout()
 
@@ -1460,19 +1187,24 @@ class Step2_GapFitting(ttk.Frame):
             if np.any(vk):
                 order = np.argsort(k_all[vk])
                 k_sel = k_all[vk][order]
-                ax.plot(k_sel, rss_g[vk][order], 'o-', color='blue', linewidth=2, markersize=6, label=r'Gap Model ($\Delta$ free)')
-                ax.plot(k_sel, rss_m[vk][order], 's--', color='red', linewidth=2, markersize=6, label=r'Metal Model ($\Delta=0$)')
+                ax.plot(k_sel, rss_g[vk][order], **plot_curve_kwargs(SERIES["gap_model"], marker='o', linestyle='-'),
+                        label=r'Gap Model ($\Delta$ free)')
+                ax.plot(k_sel, rss_m[vk][order], **plot_curve_kwargs(SERIES["metal_model"], marker='s', linestyle='--'),
+                        label=r'Metal Model ($\Delta=0$)')
             
             if self.kF_actual is not None:
-                ax.axvline(self.kF_actual, color='k', linestyle='--', linewidth=1.5, label=fr"$k_F = {self.kF_actual:.3f}$")
+                ax.axvline(self.kF_actual, color=SERIES["reference"], linestyle='--',
+                           linewidth=PRL_LINEWIDTH, label=fr"$k_F = {self.kF_actual:.3f}$")
                 
-            self._set_scientific_style(ax)
-            ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=14)
-            ax.set_ylabel('Residual Sum of Squares (RSS)', fontsize=14)
-            ax.set_title('Goodness of Fit Comparison', fontsize=14)
-            ax.grid(True, alpha=0.2, linestyle='--')
+            apply_style(ax, grid=True)
+            set_axis_labels(
+                ax,
+                xlabel=fr'Momentum $k$ ($\mathrm{{\AA}}^{{-1}}$)',
+                ylabel='Residual Sum of Squares (RSS)',
+                title='Goodness of Fit Comparison',
+            )
             
-            ax.legend(loc='best', fontsize=7, frameon=True, edgecolor='black', handlelength=1.2, labelspacing=0.3)
+            ax.legend(loc='best', **legend_kwargs(handlelength=1.2, labelspacing=0.3))
             self.fig.tight_layout()
 
         elif mode == "F-Test: P-Value":
@@ -1493,23 +1225,28 @@ class Step2_GapFitting(ttk.Frame):
                 order = np.argsort(k_all[vk])
                 k_sel = k_all[vk][order]
                 p_sel = np.clip(p_all[vk][order], np.finfo(float).tiny, 1.0)
-                ax.semilogy(k_sel, p_sel, 'mD-', markersize=7, linewidth=2, label='F-test P-value')
-            ax.axhline(y=thresh, color='black', linestyle='--', linewidth=2, label=f'Threshold ({thresh})')
+                ax.semilogy(k_sel, p_sel, **plot_curve_kwargs(SERIES["pvalue"], marker='D', linestyle='-'),
+                            label='F-test $p$-value')
+            ax.axhline(y=thresh, color=SERIES["reference"], linestyle='--', linewidth=PRL_LINEWIDTH_THICK,
+                       label=f'Threshold ({thresh})')
             
             if self.kF_actual is not None:
-                ax.axvline(self.kF_actual, color='k', linestyle='--', linewidth=1.5, label=fr"$k_F = {self.kF_actual:.3f}$")
+                ax.axvline(self.kF_actual, color=SERIES["reference"], linestyle='--',
+                           linewidth=PRL_LINEWIDTH, label=fr"$k_F = {self.kF_actual:.3f}$")
                 
-            ax.fill_between(k_all, p_min, thresh, color='green', alpha=0.1, label='Gap Significant')
-            ax.fill_between(k_all, thresh, 1.5, color='red', alpha=0.1, label='Gap Not Significant')
+            shade_significant_pvalue(ax, k_all, p_min, thresh)
+            shade_insignificant_pvalue(ax, k_all, thresh, 1.5)
             ax.set_ylim(bottom=p_min, top=1.5)
             
-            self._set_scientific_style(ax)
-            ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=14)
-            ax.set_ylabel('P-value (Log Scale)', fontsize=14)
-            ax.set_title('Statistical Significance (F-Test)', fontsize=14)
+            apply_style(ax, grid=True)
+            set_axis_labels(
+                ax,
+                xlabel=fr'Momentum $k$ ($\mathrm{{\AA}}^{{-1}}$)',
+                ylabel='$p$-value (log scale)',
+                title='Statistical Significance (F-Test)',
+            )
             
-            ax.legend(loc='best', fontsize=7, frameon=True, edgecolor='black', handlelength=1.2, labelspacing=0.3)
-            ax.grid(True, which="both", ls="--", alpha=0.2)
+            ax.legend(loc='best', **legend_kwargs(handlelength=1.2, labelspacing=0.3))
             self.fig.tight_layout()
 
         self.canvas.draw()
@@ -1556,7 +1293,7 @@ class Step2_GapFitting(ttk.Frame):
         
         plot_frame = ttk.Frame(top)
         plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        fig, ax = plt.subplots(figsize=(8, 6))
+        fig, ax = plt.subplots(figsize=gui_figsize())
         
         canvas = FigureCanvasTkAgg(fig, master=plot_frame)
         canvas.draw()
@@ -1646,15 +1383,20 @@ class Step2_GapFitting(ttk.Frame):
             
             ax.clear()
             x_plot = data_g['x'] * 1000
-            ax.plot(x_plot, data_g['y_ori'], color='#AAAAAA', linestyle='--', linewidth=1.5, label='Original')
-            ax.plot(x_plot, data_g['y_data'], 'o', markersize=5, color='#555555', markeredgecolor='none', alpha=0.6, label='Experiment')
-            line_fit_gap = ax.plot(x_plot, data_g['y_fit'], color='darkblue', linestyle='-', linewidth=2, label=r'Gap Model ($\Delta$ free)')
-            ax.plot(x_plot, data_m['y_fit'], color='firebrick', linestyle='-', linewidth=2, label=r'Metal Model ($\Delta=0$)')
+            ax.plot(x_plot, data_g['y_ori'], color=SERIES["data_bg"], linestyle='--', linewidth=PRL_LINEWIDTH, label='Original', zorder=1)
+            ax.plot(x_plot, data_g['y_data'], label='Experiment', **plot_data_points_kwargs())
+            line_fit_gap = ax.plot(x_plot, data_g['y_fit'], label=r'Gap Model ($\Delta$ free)',
+                                   **plot_fit_line_kwargs(SERIES["gap_model"]))
+            ax.plot(x_plot, data_m['y_fit'], label=r'Metal Model ($\Delta=0$)',
+                    **plot_fit_line_kwargs(SERIES["metal_model"], linestyle='--'))
             
-            self._set_scientific_style(ax)
-            ax.set_xlabel("Energy (meV)", fontsize=14)
-            ax.set_ylabel("ARPES Intensity (a.u.)", fontsize=14)
-            ax.set_title(fr"Dual Model Fit Comparison | k = {edc_k:.4f} $\mathrm{{\AA}}^{{-1}}$", fontsize=14)
+            apply_style(ax)
+            set_axis_labels(
+                ax,
+                xlabel='Energy (meV)',
+                ylabel='ARPES Intensity (a.u.)',
+                title=fr"Dual Model Fit Comparison | $k = {edc_k:.4f}$ $\mathrm{{\AA}}^{{-1}}$",
+            )
             
             N = len(data_g['y_data'])
             P_gap = len(data_g['popt'])
@@ -1663,7 +1405,7 @@ class Step2_GapFitting(ttk.Frame):
             chi2_met = np.sum(((data_g['y_data'] - data_m['y_fit']) / data_g['sigma'])**2) / (N - P_met)
             res_var.set(f"Reduced Chi-Sq (Gap): {chi2_gap:.4f}   |   (Metal): {chi2_met:.4f}")
             
-            ax.legend(loc="best", fontsize=7, frameon=True, edgecolor='black', handlelength=1.2, labelspacing=0.3)
+            ax.legend(loc="best", **legend_kwargs(handlelength=1.2, labelspacing=0.3))
             fig.tight_layout()
             canvas.draw()
             
@@ -1733,8 +1475,7 @@ class Step2_GapFitting(ttk.Frame):
         parent_dir = filedialog.askdirectory(title="Select Parent Directory to Create 'result' Folder")
         if not parent_dir: 
             return
-            
-        import os
+
         try:
             # Create a dedicated 'result' folder inside the selected parent directory
             export_dir = os.path.join(parent_dir, 'result')
@@ -1830,12 +1571,13 @@ class Step2_GapFitting(ttk.Frame):
         if self.controller and hasattr(self.controller, 'notebook') and hasattr(self.controller, 'step3_module'):
             self.controller.notebook.select(self.controller.step3_module)
 
-# =============================================================================
-# --- Standalone Test Execution ---
-# =============================================================================
+
+Step2_GapFitting = Step2GapFitting
+
+
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("ARPES Tool - Step 2 Testing Environment")
+    root.title("ARPES Tool - Step 2")
     root.geometry("1350x850")
     
     class MockController:

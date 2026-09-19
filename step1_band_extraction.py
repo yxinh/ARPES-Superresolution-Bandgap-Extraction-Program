@@ -1,25 +1,48 @@
+"""Step 1: high-temperature preprocessing and normal-state dispersion."""
+
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import numpy as np
 import threading
 import pandas as pd
-import sys
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from mpl_toolkits.axes_grid1 import make_axes_locatable 
+from matplotlib.lines import Line2D
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy.optimize import curve_fit
 from scipy.interpolate import UnivariateSpline
-from scipy.ndimage import gaussian_filter, gaussian_filter1d
+from scipy.ndimage import gaussian_filter1d
 from scipy.integrate import cumulative_trapezoid
 
-# =============================================================================
-# --- Physical Constants and Conversion Factors ---
-# =============================================================================
-KB_CONSTANT = 8.617333262145e-5  # Boltzmann constant in eV/K
-FWHM_TO_SIGMA = 2.3548           
+from arpes_physics import (
+    KB as KB_CONSTANT,
+    FWHM_TO_SIGMA,
+    load_arpes_dat,
+    shirley_background_2d,
+    poisson_scale,
+    intensity_sigma,
+)
+from gui_common import bind_mousewheel, mousewheel_delta
+from prl_plot_style import (
+    apply_style, COLORS, SERIES, PRL_LINEWIDTH, PRL_LINEWIDTH_THICK,
+    PRL_MARKERSIZE, PRL_LABEL_SIZE, PRL_TITLE_SIZE,
+    gui_figsize, legend_kwargs, set_axis_labels, style_colorbar,
+    imshow_intensity, imshow_diverging, add_intensity_colorbar,
+    plot_fit_line_kwargs, plot_data_points_kwargs,
+)
 
-class Step1_BandExtraction(ttk.Frame):
+# EDC / MDC extraction markers (Okabe–Ito, colorblind-safe on dark ARPES maps)
+_EXTRACT_EDC_COLOR = COLORS["blue"]
+_EXTRACT_MDC_COLOR = COLORS["orange"]
+_EXTRACT_MARKER_SIZE = PRL_MARKERSIZE
+_EXTRACT_MARKER_AREA = PRL_MARKERSIZE ** 2
+_EXTRACT_SELECTED_AREA = _EXTRACT_MARKER_AREA
+_EXTRACT_SELECTED_EDGE_LW = 0.9
+_SPLINE_COLOR = "#FF9999"
+_SPLINE_LW = PRL_LINEWIDTH_THICK
+_SPLINE_ALPHA = 0.72
+
+class Step1BandExtraction(ttk.Frame):
     def __init__(self, parent, controller=None, **kwargs):
         super().__init__(parent, **kwargs)
         self.controller = controller 
@@ -68,15 +91,6 @@ class Step1_BandExtraction(ttk.Frame):
         }
 
     # =============================================================================
-    # --- Publication Ready Style Helper ---
-    # =============================================================================
-    def _set_scientific_style(self, ax):
-        """Applies publication-quality styling to the given matplotlib axis."""
-        ax.tick_params(direction='in', length=6, width=1.5, colors='k', top=True, right=True, labelsize=12)
-        for spine in ax.spines.values():
-            spine.set_linewidth(1.5)
-
-    # =============================================================================
     # --- UI Construction Methods ---
     # =============================================================================
     def _build_ui(self):
@@ -88,8 +102,7 @@ class Step1_BandExtraction(ttk.Frame):
         self.control_frame.bind("<Configure>", lambda e: self.control_canvas.configure(scrollregion=self.control_canvas.bbox("all")))
         self.control_canvas.bind("<Configure>", lambda e: self.control_canvas.itemconfig(self.control_window, width=e.width))
         
-        self.control_canvas.bind('<Enter>', self._bound_to_mousewheel)
-        self.control_canvas.bind('<Leave>', self._unbound_to_mousewheel)
+        bind_mousewheel(self.control_canvas, self._on_mousewheel)
 
         self.control_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
         self.control_scrollbar.pack(side=tk.LEFT, fill=tk.Y)
@@ -114,7 +127,7 @@ class Step1_BandExtraction(ttk.Frame):
         except Exception:
             pass
         
-        self.fig, self.ax = plt.subplots(figsize=(6, 4.5)) 
+        self.fig, self.ax = plt.subplots(figsize=gui_figsize()) 
         self.divider = make_axes_locatable(self.ax)
         self.cax = self.divider.append_axes("right", size="5%", pad=0.05)
         self.fig.tight_layout()
@@ -126,7 +139,7 @@ class Step1_BandExtraction(ttk.Frame):
         self.toolbar.update()
         self.toolbar.pack(side=tk.BOTTOM, fill=tk.X)
         
-        ttk.Label(self.plot_frame, text="💡 Tip: Right-Click always selects points and picks Seed.", foreground="gray", font=("Arial", 9, "italic")).pack(side=tk.BOTTOM, fill=tk.X, pady=2)
+        ttk.Label(self.plot_frame, text="Tip: Right-click selects points and picks the seed.", foreground="gray", font=("Arial", 9, "italic")).pack(side=tk.BOTTOM, fill=tk.X, pady=2)
         
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self.canvas.mpl_connect('button_press_event', self.on_click_plot)
@@ -137,27 +150,8 @@ class Step1_BandExtraction(ttk.Frame):
         self._build_step3_controls()
         self._build_step4_controls()
 
-    def _bound_to_mousewheel(self, event):
-        self.control_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        self.control_canvas.bind_all("<Button-4>", self._on_mousewheel)
-        self.control_canvas.bind_all("<Button-5>", self._on_mousewheel)
-
-    def _unbound_to_mousewheel(self, event):
-        self.control_canvas.unbind_all("<MouseWheel>")
-        self.control_canvas.unbind_all("<Button-4>")
-        self.control_canvas.unbind_all("<Button-5>")
-
     def _on_mousewheel(self, event):
-        if event.num == 4:
-            self.control_canvas.yview_scroll(-1, "units")
-        elif event.num == 5:
-            self.control_canvas.yview_scroll(1, "units")
-        elif event.delta != 0:
-            if sys.platform == "darwin":
-                delta_dir = -1 if event.delta > 0 else 1
-                self.control_canvas.yview_scroll(delta_dir, "units")
-            else:
-                self.control_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self.control_canvas.yview_scroll(mousewheel_delta(event), "units")
 
     def _build_constants_panel(self):
         frame = tk.Frame(self.control_frame, bg='#e0e0e0', padx=2, pady=2, relief=tk.GROOVE, borderwidth=2)
@@ -408,25 +402,7 @@ class Step1_BandExtraction(ttk.Frame):
             self.T = float(self.ent_temp.get())
             raw_res = float(self.ent_res.get())
             self.energy_res_sigma = raw_res / FWHM_TO_SIGMA
-            with open(self.file_path, 'r') as f:
-                raw_lines = [line.rstrip('\n') for line in f if line.strip() != '']
-            first_line = raw_lines[0].split('\t')
-            e_vals_temp = np.array([float(x) for x in first_line if x.strip() != ''])
-            k_vals_temp, intensity_temp = [], []
-            for line in raw_lines[1:]:
-                parts = line.split('\t')
-                if len(parts) < 2: continue
-                try: k_vals_temp.append(float(parts[1]))
-                except ValueError: continue
-                row = [float(x) if x.strip() != '' else 0.0 for x in parts[2:]]
-                intensity_temp.append(row)
-            k_vals_temp = np.array(k_vals_temp)
-            I_ex_temp = np.array(intensity_temp, dtype=float).T
-            if k_vals_temp[0] > k_vals_temp[-1]:
-                k_vals_temp, I_ex_temp = k_vals_temp[::-1], I_ex_temp[:, ::-1]
-            if e_vals_temp[0] > e_vals_temp[-1]:
-                e_vals_temp, I_ex_temp = e_vals_temp[::-1], I_ex_temp[::-1, :]
-            self.I_raw, self.k_raw, self.e_raw = I_ex_temp, k_vals_temp, e_vals_temp
+            self.I_raw, self.k_raw, self.e_raw = load_arpes_dat(self.file_path)
             self.I_raw_roi, self.I_shirley_bg, self.I_proc = None, None, None
             
             self.extracted_df = pd.DataFrame()
@@ -455,6 +431,69 @@ class Step1_BandExtraction(ttk.Frame):
         self.btn_noise.config(state=tk.NORMAL)
         self.btn_insp_shirley.config(state=tk.NORMAL) 
         self.btn_shirley.config(state=tk.NORMAL)
+
+    def _plot_extraction_markers(self):
+        """Draw EDC/MDC fit points; fill color = method, black border = selected."""
+        if self.extracted_df.empty:
+            return []
+
+        selected_set = set(self.selected_points)
+        has_edc = has_mdc = False
+        legend_handles = []
+
+        specs = [
+            ("EDC", self.extracted_df["type"] == "EDC", _EXTRACT_EDC_COLOR, "EDC fit"),
+            ("MDC", self.extracted_df["type"].isin(["MDC_L", "MDC_R"]), _EXTRACT_MDC_COLOR, "MDC fit"),
+        ]
+
+        for name, mask, color, _label in specs:
+            sub = self.extracted_df[mask]
+            if sub.empty:
+                continue
+            if name == "EDC":
+                has_edc = True
+            else:
+                has_mdc = True
+
+            unsel_k, unsel_e, sel_k, sel_e = [], [], [], []
+            for _, row in sub.iterrows():
+                pt = (row["k"], row["E"])
+                e_mev = row["E"] * 1000
+                if pt in selected_set:
+                    sel_k.append(row["k"])
+                    sel_e.append(e_mev)
+                else:
+                    unsel_k.append(row["k"])
+                    unsel_e.append(e_mev)
+
+            if unsel_k:
+                self.ax.scatter(
+                    unsel_k, unsel_e, c=color, s=_EXTRACT_MARKER_AREA, marker="o",
+                    edgecolors="none", linewidths=0, zorder=6,
+                )
+            if sel_k:
+                self.ax.scatter(
+                    sel_k, sel_e, c=color, s=_EXTRACT_SELECTED_AREA, marker="o",
+                    edgecolors=COLORS["black"], linewidths=_EXTRACT_SELECTED_EDGE_LW, zorder=8,
+                )
+
+        if has_edc:
+            legend_handles.append(Line2D(
+                [], [], marker="o", linestyle="None", markersize=_EXTRACT_MARKER_SIZE,
+                markerfacecolor=_EXTRACT_EDC_COLOR, markeredgecolor="none", label="EDC fit",
+            ))
+        if has_mdc:
+            legend_handles.append(Line2D(
+                [], [], marker="o", linestyle="None", markersize=_EXTRACT_MARKER_SIZE,
+                markerfacecolor=_EXTRACT_MDC_COLOR, markeredgecolor="none", label="MDC fit",
+            ))
+        if self.selected_points:
+            legend_handles.append(Line2D(
+                [], [], marker="o", linestyle="None", markersize=_EXTRACT_MARKER_SIZE,
+                markerfacecolor=COLORS["lightgray"], markeredgecolor=COLORS["black"],
+                markeredgewidth=_EXTRACT_SELECTED_EDGE_LW, label="Selected",
+            ))
+        return legend_handles
 
     def _update_plot(self, preserve_limits=False):
         if self.I_raw is None: return
@@ -511,33 +550,39 @@ class Step1_BandExtraction(ttk.Frame):
             vmin_global, vmax_global = np.nanmin(self.I_raw), np.nanmax(self.I_raw)
 
         extent = [plot_k[0], plot_k[-1], plot_e[0]*1000, plot_e[-1]*1000]
-        im = self.ax.imshow(plot_I, aspect='auto', origin='lower', extent=extent, cmap='inferno', vmin=vmin_global, vmax=vmax_global)
-        self.fig.colorbar(im, cax=self.cax)
-        self.cax.set_ylabel('Intensity (a.u.)', fontsize=10)
-        self.ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=12)
-        self.ax.set_ylabel('Energy E (meV)', fontsize=12)
-        self.ax.set_title(title_text, fontsize=14)
+        im = imshow_intensity(self.ax, plot_I, extent, vmin=vmin_global, vmax=vmax_global)
+        add_intensity_colorbar(self.fig, im, self.cax)
+        set_axis_labels(
+            self.ax,
+            xlabel=fr'Momentum $k$ ($\mathrm{{\AA}}^{{-1}}$)',
+            ylabel='Energy $E$ (meV)',
+            title=title_text,
+        )
         
         if "Background" not in mode:
-            if self.extracted_points:
-                ks, es = zip(*self.extracted_points)
-                es_plot = [e * 1000 for e in es]
-                self.ax.scatter(ks, es_plot, c='white', s=2, alpha=0.5, label='Extracted Points')
-            if self.selected_points:
-                ks_sel, es_sel = zip(*self.selected_points)
-                es_sel_plot = [e * 1000 for e in es_sel]
-                self.ax.scatter(ks_sel, es_sel_plot, c='red', s=12, marker='o', label='Selected Points')
-            if self.spline_func is not None:
+            legend_handles = self._plot_extraction_markers()
+            if self.spline_func is not None and self.selected_points:
+                ks_sel, _ = zip(*self.selected_points)
                 k_smooth = np.linspace(min(ks_sel), max(ks_sel), 200)
-                self.ax.plot(k_smooth, self.spline_func(k_smooth) * 1000, 'g-', linewidth=2, label='Fitted Spline Band')
-            if self.extracted_points or self.selected_points or self.spline_func:
-                self.ax.legend(loc='upper right', fontsize=7, frameon=True, facecolor='white', edgecolor='gray', framealpha=0.8)
+                y_spline = self.spline_func(k_smooth) * 1000
+                self.ax.plot(
+                    k_smooth, y_spline,
+                    color=_SPLINE_COLOR, linewidth=_SPLINE_LW, alpha=_SPLINE_ALPHA,
+                    linestyle='-', zorder=9, label='Fitted Spline Band',
+                )
+            if legend_handles or self.spline_func is not None:
+                auto_handles, _ = self.ax.get_legend_handles_labels()
+                self.ax.legend(
+                    handles=legend_handles + auto_handles,
+                    loc='upper right', **legend_kwargs(),
+                )
                 
         if preserve_limits and xlim is not None and ylim is not None:
             self.ax.set_xlim(xlim); self.ax.set_ylim(ylim)
         else:
             self.ax.set_xlim(plot_k[0], plot_k[-1]); self.ax.set_ylim(plot_e[0] * 1000, plot_e[-1] * 1000)
-                
+
+        apply_style(self.ax)
         self.fig.tight_layout(); self.canvas.draw()
 
     # ================= Preprocessing =================
@@ -557,7 +602,7 @@ class Step1_BandExtraction(ttk.Frame):
         if self.bg_noise_data is None: return
         k_vals, e_vals_bg, roi = self.bg_noise_data
         top = tk.Toplevel(self.winfo_toplevel()); top.title("Background Noise Region Inspector")
-        fig, ax = plt.subplots(figsize=(6, 4.5))
+        fig, ax = plt.subplots(figsize=gui_figsize())
         
         canvas = FigureCanvasTkAgg(fig, master=top)
         canvas.draw()
@@ -567,11 +612,16 @@ class Step1_BandExtraction(ttk.Frame):
         canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
         extent = [k_vals[0], k_vals[-1], e_vals_bg[0]*1000, e_vals_bg[-1]*1000]
-        im = ax.imshow(roi, aspect='auto', origin='lower', extent=extent, cmap='inferno')
-        fig.colorbar(im, ax=ax, label='Intensity (a.u.)')
-        ax.set_xlabel(fr'Momentum k ($\mathrm{{\AA}}^{{-1}}$)', fontsize=12)
-        ax.set_ylabel('Energy E (meV)', fontsize=12)
-        ax.set_title("Background Estimation Region", fontsize=14)
+        im = imshow_intensity(ax, roi, extent)
+        cbar = fig.colorbar(im, ax=ax)
+        style_colorbar(cbar, label='Intensity (a.u.)')
+        set_axis_labels(
+            ax,
+            xlabel=fr'Momentum $k$ ($\mathrm{{\AA}}^{{-1}}$)',
+            ylabel='Energy $E$ (meV)',
+            title='Background Estimation Region',
+        )
+        apply_style(ax)
         fig.tight_layout()
         canvas.draw()
 
@@ -584,19 +634,8 @@ class Step1_BandExtraction(ttk.Frame):
             e_mask = (self.e_raw >= e_l) & (self.e_raw <= e_r)
             if not np.any(k_mask) or not np.any(e_mask): return messagebox.showwarning("Warning", "Selected ROI is empty!")
             roi = self.I_raw[np.ix_(e_mask, k_mask)]
-            
-            pad_w = int(np.ceil(4 * smooth_sigma))
-            if pad_w > 0:
-                padded_roi = np.pad(roi, pad_width=pad_w, mode='edge')
-                smoothed_padded = gaussian_filter(padded_roi, sigma=smooth_sigma)
-                roi_lp = smoothed_padded[pad_w:-pad_w, pad_w:-pad_w]
-            else:
-                roi_lp = gaussian_filter(roi, sigma=smooth_sigma)
-                
-            residual = roi - roi_lp
-            mean_signal = np.mean(roi_lp[roi_lp > 0]) if roi_lp[roi_lp > 0].size > 0 else 1e-12
-            self.alpha_est = np.sqrt(np.var(residual) / abs(mean_signal) + 1e-12)
-            self.var_alpha.set(f"{self.alpha_est:.5f}") 
+            self.alpha_est, roi_lp, residual = poisson_scale(roi, smooth_sigma)
+            self.var_alpha.set(f"{self.alpha_est:.5f}")
             self.noise_data = (roi, roi_lp, residual, k_mask, e_mask)
             self.btn_insp_noise.config(state=tk.NORMAL) 
         except Exception as e: messagebox.showerror("Noise Est. Error", str(e))
@@ -618,13 +657,19 @@ class Step1_BandExtraction(ttk.Frame):
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
             
-            im0 = axes[0].imshow(self.noise_data[0], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='inferno')
-            axes[0].set_title("Original ROI"); fig.colorbar(im0, ax=axes[0])
-            im1 = axes[1].imshow(self.noise_data[1], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='inferno')
-            axes[1].set_title("Smoothed (Signal)"); fig.colorbar(im1, ax=axes[1])
+            ext = [k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000]
+            im0 = imshow_intensity(axes[0], self.noise_data[0], ext)
+            axes[0].set_title("Original ROI", fontsize=PRL_TITLE_SIZE)
+            style_colorbar(fig.colorbar(im0, ax=axes[0]))
+            im1 = imshow_intensity(axes[1], self.noise_data[1], ext)
+            axes[1].set_title("Smoothed (Signal)", fontsize=PRL_TITLE_SIZE)
+            style_colorbar(fig.colorbar(im1, ax=axes[1]))
             std_res = np.std(self.noise_data[2])
-            im2 = axes[2].imshow(self.noise_data[2], aspect='auto', origin='lower', extent=[k_roi[0], k_roi[-1], e_roi[0]*1000, e_roi[-1]*1000], cmap='coolwarm', vmin=-std_res*3, vmax=std_res*3)
-            axes[2].set_title(f"Residual (Noise)\nalpha_est = {self.alpha_est:.4f}"); fig.colorbar(im2, ax=axes[2])
+            im2 = imshow_diverging(axes[2], self.noise_data[2], ext, std_res * 3)
+            axes[2].set_title(f"Residual (Noise)\n$\\alpha_{{est}}$ = {self.alpha_est:.4f}", fontsize=PRL_TITLE_SIZE)
+            style_colorbar(fig.colorbar(im2, ax=axes[2]))
+            for a in axes:
+                apply_style(a)
             
             fig.tight_layout(pad=2.0, w_pad=3.0)
             canvas.draw()
@@ -665,14 +710,13 @@ class Step1_BandExtraction(ttk.Frame):
         plot_frame = ttk.Frame(top)
         plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        fig, ax = plt.subplots(figsize=(8, 6))
-        # [FIX 2]: Ensure right space reserved for outer legend
+        fig, ax = plt.subplots(figsize=gui_figsize())
+        # Reserve right space for outer legend
         fig.subplots_adjust(left=0.1, right=0.75, bottom=0.12, top=0.92) 
         
         canvas = FigureCanvasTkAgg(fig, master=plot_frame)
         canvas.draw()
         
-        # [CRITICAL]: Toolbar packed first to BOTTOM to prevent vanishing
         toolbar = NavigationToolbar2Tk(canvas, plot_frame)
         toolbar.update()
         toolbar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -695,30 +739,34 @@ class Step1_BandExtraction(ttk.Frame):
             N, I_left, I_right = len(E_sorted), I_sorted[0], I_sorted[-1]
             
             ax.clear(); B = np.linspace(I_left, I_right, N)
-            ax.plot(E_plot, I_sorted, label='Original $I(E)$', color='black', linewidth=2)
+            ax.plot(E_plot, I_sorted, label='Original $I(E)$', **plot_fit_line_kwargs(SERIES["reference"]))
             
             for n in range(max_iter):
                 B_old = np.copy(B); Y = np.maximum(I_sorted - B_old, 0)
                 cum_int = np.zeros(N); cum_int[1:] = cumulative_trapezoid(Y, E_sorted)
                 if cum_int[-1] == 0: break
                 B = I_right + (I_left - I_right) * ((cum_int[-1] - cum_int) / cum_int[-1])
-                if (n + 1) % plot_step == 0: ax.plot(E_plot, B, label=f'Iter {n+1}', alpha=0.8)
+                if (n + 1) % plot_step == 0:
+                    ax.plot(E_plot, B, label=f'Iter {n+1}', color=COLORS['gray'], linestyle='--', linewidth=PRL_LINEWIDTH, alpha=0.7)
                 if np.max(np.abs(B - B_old)) < tol: break
                 
-            ax.plot(E_plot, B, label='Final Shirley BG', color='red', linewidth=2.5)
-            ax.plot(E_plot, np.maximum(I_sorted - B, 1e-4), color='blue', linewidth=2, label='Subtracted Signal')
+            ax.plot(E_plot, B, label='Final Shirley BG', **plot_fit_line_kwargs(SERIES["background"]))
+            ax.plot(E_plot, np.maximum(I_sorted - B, 1e-4), **plot_fit_line_kwargs(SERIES["gap_model"], linestyle='-'),
+                     label='Subtracted Signal')
             
-            self._set_scientific_style(ax)
-            ax.set_xlabel('Energy (meV)', fontsize=14)
-            ax.set_ylabel('Intensity (a.u.)', fontsize=14)
-            ax.set_title(fr"Shirley BG Tuning | Momentum = {actual_k:.4f} $\mathrm{{\AA}}^{{-1}}$", fontsize=14)
+            apply_style(ax)
+            set_axis_labels(
+                ax,
+                xlabel='Energy (meV)',
+                ylabel='Intensity (a.u.)',
+                title=fr"Shirley BG Tuning | $k = {actual_k:.4f}$ $\mathrm{{\AA}}^{{-1}}$",
+            )
             
             pad_I = (np.max(I_sorted) - np.min(I_sorted)) * 0.1
             ax.set_xlim(np.min(E_plot), np.max(E_plot))
             ax.set_ylim(0, np.max(I_sorted) + pad_I)
             
-            # [FIX 2]: Legend perfectly mapped to the empty right side created by subplots_adjust
-            ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left", fontsize=10, frameon=True, edgecolor='black')
+            ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left", **legend_kwargs())
             
             canvas.draw()
 
@@ -754,40 +802,11 @@ class Step1_BandExtraction(ttk.Frame):
 
     def _shirley_thread(self, I_crop, max_iter, tol, smooth_k_pts):
         try:
-            I_bg_total = np.zeros_like(I_crop)
-            all_converged, max_err_val, max_err_k_idx = True, 0.0, -1
-            e = self.e_proc 
-            for j in range(I_crop.shape[1]):
-                y, bg = I_crop[:, j], np.zeros_like(I_crop[:, j])
-                y_min = np.min(y); y_proc = y - y_min
-                converged, last_diff = False, 0.0
-                for _ in range(max_iter):
-                    y_eff = np.maximum(y_proc - bg, 0); integral = np.zeros_like(y_eff)
-                    for i in range(len(y_eff)-2, -1, -1):
-                        integral[i] = integral[i+1] + 0.5 * (y_eff[i+1] + y_eff[i]) * (e[i+1] - e[i])
-                    if integral[0] == 0: break
-                    new_bg = y_proc[-1] + ((y_proc[0] - y_proc[-1]) / integral[0]) * integral
-                    last_diff = np.max(np.abs(new_bg - bg))
-                    if last_diff < tol: bg = new_bg; converged = True; break
-                    bg = new_bg
-                if not converged:
-                    all_converged = False
-                    if last_diff > max_err_val: max_err_val, max_err_k_idx = last_diff, j
-                I_bg_total[:, j] = bg + y_min
-            
-            if smooth_k_pts > 0:
-                pad_w = int(np.ceil(4 * smooth_k_pts))
-                if pad_w > 0:
-                    padded_bg = np.pad(I_bg_total, pad_width=((0,0), (pad_w, pad_w)), mode='edge')
-                    smoothed_bg = gaussian_filter1d(padded_bg, sigma=smooth_k_pts, axis=1)
-                    I_bg_total_smoothed = smoothed_bg[:, pad_w:-pad_w]
-                else:
-                    I_bg_total_smoothed = gaussian_filter1d(I_bg_total, sigma=smooth_k_pts, axis=1)
-            else:
-                I_bg_total_smoothed = I_bg_total
-
+            I_bg_total, all_converged, max_err_val, max_err_k_idx = shirley_background_2d(
+                self.e_proc, I_crop, max_iter, tol, smooth_k_pts
+            )
             self._temp_I_raw_roi = I_crop
-            self._temp_I_bg_total = I_bg_total_smoothed    
+            self._temp_I_bg_total = I_bg_total
             err_k_val = self.k_proc[max_err_k_idx] if max_err_k_idx != -1 else None
             self.after(0, lambda: self._shirley_done(all_converged, max_err_val, err_k_val))
         except Exception as err:
@@ -895,7 +914,7 @@ class Step1_BandExtraction(ttk.Frame):
                     if flag: last = [np.max(edc_data)*0.01, e_fit_axes[np.argmax(edc_data)], 1e-3]
                     flag = False
                     
-                    sigma_arr = np.sqrt(np.abs(ori_data) * self.alpha_est**2 + self.bg_noise_val + 1e-12)
+                    sigma_arr = intensity_sigma(ori_data, self.alpha_est, self.bg_noise_val)
                     
                     try:
                         popt, _ = curve_fit(EDC_fitting, e_fit_axes, edc_data, p0=last, bounds=([0, np.min(e_fit_axes), 0], [np.inf, np.max(e_fit_axes), np.inf]), sigma=sigma_arr, maxfev=1000, method='trf')
@@ -924,7 +943,7 @@ class Step1_BandExtraction(ttk.Frame):
                     if flag: last = [np.max(mdc_data)*gamma_est**2, k_fit_axes[0]+k_fit_axes[-1]-k_peak, gamma_est, np.max(mdc_data)*gamma_est**2, k_peak, gamma_est]
                     flag = False
                     
-                    sigma_arr = np.sqrt(np.abs(ori_data) * self.alpha_est**2 + self.bg_noise_val + 1e-12)
+                    sigma_arr = intensity_sigma(ori_data, self.alpha_est, self.bg_noise_val)
                     
                     try:
                         popt, _ = curve_fit(double_lorentzian, k_fit_axes, mdc_data, p0=last, bounds=([0, np.min(k_fit_axes), 0, 0, np.min(k_fit_axes), 0], [np.inf, np.max(k_fit_axes), np.inf, np.inf, np.max(k_fit_axes), np.inf]), sigma=sigma_arr, maxfev=1000, method='trf')
@@ -1005,7 +1024,8 @@ class Step1_BandExtraction(ttk.Frame):
         btn_next = ttk.Button(nav_frame, text="Next >>", command=lambda: update_plot(step=1)); btn_next.pack(side=tk.RIGHT, expand=True, fill=tk.X, padx=5)
         
         plot_frame = ttk.Frame(top); plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        fig, ax = plt.subplots(); canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+        fig, ax = plt.subplots(figsize=gui_figsize())
+        canvas = FigureCanvasTkAgg(fig, master=plot_frame)
         canvas.draw()
         
         toolbar = NavigationToolbar2Tk(canvas, plot_frame); toolbar.update(); toolbar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -1117,26 +1137,33 @@ class Step1_BandExtraction(ttk.Frame):
             
             ax.clear()
             x_plot = data['x'] * 1000 if mode_var.get() == 'EDC' else data['x']
-            ax.plot(x_plot, data['y_ori'], color='#AAAAAA', linestyle='--', linewidth=1.5, label='Original')
-            ax.plot(x_plot, data['y_data'], 'o', markersize=5, color='#555555', markeredgecolor='none', alpha=0.6, label='Experiment')
-            line_fit = ax.plot(x_plot, data['y_fit'], color='darkblue', linestyle='-', linewidth=2, label=f'Fitting ({mode_var.get()} Peak)')
+            ax.plot(x_plot, data['y_ori'], color=SERIES["data_bg"], linestyle='--', linewidth=PRL_LINEWIDTH, label='Original', zorder=1)
+            ax.plot(x_plot, data['y_data'], label='Experiment', **plot_data_points_kwargs())
+            line_fit = ax.plot(x_plot, data['y_fit'], label=f'Fitting ({mode_var.get()} Peak)',
+                               **plot_fit_line_kwargs(SERIES["fit"]))
             
-            self._set_scientific_style(ax)
+            apply_style(ax)
             if mode_var.get() == "EDC":
-                ax.set_xlabel("Energy (meV)", fontsize=14)
-                ax.set_title(fr"EDC Fit Inspection | k = {data['k']:.4f} $\mathrm{{\AA}}^{{-1}}$", fontsize=14)
+                set_axis_labels(
+                    ax,
+                    xlabel='Energy (meV)',
+                    ylabel='ARPES Intensity (a.u.)',
+                    title=fr"EDC Fit Inspection | $k = {data['k']:.4f}$ $\mathrm{{\AA}}^{{-1}}$",
+                )
                 names = ["Amplitude", "Peak E0", "Gamma"]
             else:
-                ax.set_xlabel(fr"Momentum k ($\mathrm{{\AA}}^{{-1}}$)", fontsize=14)
-                ax.set_title(f"MDC Fit Inspection | E = {data['E']*1000:.2f} meV", fontsize=14)
+                set_axis_labels(
+                    ax,
+                    xlabel=fr'Momentum $k$ ($\mathrm{{\AA}}^{{-1}}$)',
+                    ylabel='ARPES Intensity (a.u.)',
+                    title=fr"MDC Fit Inspection | $E = {data['E']*1000:.2f}$ meV",
+                )
                 names = ["Amp 1", "Peak 1", "Gamma 1", "Amp 2", "Peak 2", "Gamma 2"]
-                
-            ax.set_ylabel("ARPES Intensity (a.u.)", fontsize=14)
             
             res_val = np.mean(((data['y_data'] - data['y_fit']) / data['sigma'])**2)
             res_var.set(f"Reduced Chi-Sq: {res_val:.4e}")
             
-            ax.legend(loc="best", fontsize=7, frameon=True, edgecolor='black', handlelength=1.2, labelspacing=0.3)
+            ax.legend(loc="best", **legend_kwargs())
             fig.tight_layout()
             canvas.draw()
             
@@ -1265,14 +1292,18 @@ class Step1_BandExtraction(ttk.Frame):
         if self.controller and hasattr(self.controller, 'notebook'):
             self.controller.notebook.select(self.controller.step2_module)
 
+
+Step1_BandExtraction = Step1BandExtraction
+
+
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("ARPES Tool - Step 1 Testing Environment")
+    root.title("ARPES Tool - Step 1")
     root.geometry("1350x850")
     notebook = ttk.Notebook(root)
     notebook.pack(fill=tk.BOTH, expand=True)
-    tab_1_container = ttk.Frame(notebook)
-    notebook.add(tab_1_container, text=" Step 1: Preprocessing & Extraction ")
-    app_step1 = Step1_BandExtraction(tab_1_container)
-    app_step1.pack(fill=tk.BOTH, expand=True)
+    tab = ttk.Frame(notebook)
+    notebook.add(tab, text=" Step 1: Preprocessing & Extraction ")
+    app = Step1BandExtraction(tab)
+    app.pack(fill=tk.BOTH, expand=True)
     root.mainloop()

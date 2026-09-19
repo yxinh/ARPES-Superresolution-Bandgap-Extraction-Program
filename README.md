@@ -1,79 +1,91 @@
-# ARPES Integrated Analysis Suite
+# ARPES Superconducting-Gap Extraction
 
-A comprehensive GUI-based tool developed in Python for the integrated analysis of **Angle-Resolved Photoemission Spectroscopy (ARPES)** data. This suite provides a streamlined workflow from raw data preprocessing to sophisticated physical model fitting.
+Python analysis suite that accompanies the RSI methods paper on
+**multi-momentum weighted-average (MMWA)** extraction of the superconducting
+gap from ARPES energy-distribution curves.
 
-## 🚀 Core Modules
+The workflow is a three-tab Tkinter application:
 
-### 1. Step 1: Preprocessing & Band Extraction
-- **Data Loading**: Import raw ARPES data (supports CSV/TSV formats).
-- **Background Subtraction**: Integrated **Shirley background** subtraction for noise reduction.
-- **ROI Selection**: Interactive Region of Interest (ROI) selection for spectral analysis.
-- **Spline Fitting**: Uses `UnivariateSpline` for precise band skeleton extraction from **high-temperature** (normal state) experimental spectra.
+1. **Band extraction** — load a high-temperature (normal-state) map, optional
+   Shirley background, EDC/MDC peak tracking, and a spline for \(\xi_k\).
+2. **Gap fitting** — Dynes + Fermi–Dirac + Gaussian-resolution fits at every
+   momentum in a window around \(k_F\), nested \(F\)-test against a gapless
+   model, then MMWA combination of the valid \(\Delta(k)\) points.
+3. **Temperature dependence** — batch-load Step-2 exports, apply the
+   chemical-potential correction \(\Delta_{\mathrm{corr}}^2=\Delta_{\mathrm{app}}^2-\xi_\mu^2\),
+   and compare MMWA with single-\(k_F\) (SKF) results against a BCS interpolation.
 
-### 2. Step 2: SC Gap Fitting & F-Test
-- **Advanced Fitting**: Specialized modules for extracting superconducting (SC) gap parameters ($\Delta$).
-- **Statistical Analysis**: Implements the **F-Test** to compare different fitting models (e.g., Gap vs. Gapless), ensuring statistical significance in bandgap determination.
-- **Physical Modeling**: Accounts for thermal broadening using the Fermi-Dirac distribution and Boltzmann constant ($k_B$).
+## Requirements
 
-### 3. Step 3: Temperature Dependence Analysis
-- **Scattering Rate ($\Gamma$)**: Automated analysis of the temperature dependence of the scattering rate.
-- **Evolution Visualization**: Track how RSS (Residual Sum of Squares) and other physical parameters evolve across different temperature points.
-- **Gapless State Detection**: Automatic shading of the normal state based on $T_c$ estimates.
+- Python 3.9 or later
+- NumPy, SciPy, pandas, Matplotlib
+- Tkinter (included with most Python distributions)
 
-## 🛠️ Requirements
+## Installation
 
-- **Python 3.8+**
-- **Tkinter**: GUI framework.
-- **NumPy & Pandas**: Data manipulation.
-- **Matplotlib**: Publication-quality plotting.
-- **SciPy**: Optimization (`curve_fit`), interpolation, and statistical tests.
+```bash
+git clone https://github.com/yxinh/ARPES-Superresolution-Bandgap-Extraction-Program.git
+cd ARPES-Superresolution-Bandgap-Fitting-Program
 
-## 📦 Installation & Setup
+conda env create -f environment.yml
+conda activate arpes-fitting
+```
 
-1. **Clone the repository**:
-   ```bash
-   git clone [https://github.com/yxinh/ARPES-Superresolution-Bandgap-Fitting-Program.git](https://github.com/yxinh/ARPES-Superresolution-Bandgap-Fitting-Program.git)
-   cd ARPES-Superresolution-Bandgap-Fitting-Program
-   ```
+Alternatively: `pip install -r requirements.txt`.
 
-2. **Create Environment**:
-   ```bash
-   # Using Conda (Recommended)
-   conda env create -f environment.yml
-   conda activate arpes-suite
-   ```
+## Usage
 
-## 🖥️ Usage
-
-Launch the main application:
 ```bash
 python MainApp.py
 ```
 
-## 🔄 Workflow
+Typical sequence:
 
-1. **Step 1**: Load and normalize your ARPES data, then extract the band structure from the high-temperature (reference) dataset.
-2. **Step 2**: Perform gap fitting on low-temperature data and use the **F-Test** to validate the presence of a spectral gap.
-3. **Step 3**: Batch import multiple temperature datasets to analyze the evolution of physics parameters across phase transitions.
+1. In Step 1, load the high-\(T\) `.dat` map, subtract background, extract the
+   band, and fit the spline (this spline is passed to Step 2).
+2. In Step 2, load each low-\(T\) map, run the gap / gapless fits, inspect the
+   MMWA window, and **Save** / **Export All Results**. Export files are written
+   as `result/fit_results_<T>K.txt`.
+3. In Step 3, load that folder (or pull saved results from Step 2), set the
+   BCS-fit and \(\mu\)-drift windows, and export the temperature panels.
 
-## 🎓 Citation
+Each Step file can also be launched on its own for debugging
+(`python step1_band_extraction.py`, …).
 
-If you use this software in your research or publication, please cite it as follows:
+## Repository layout
 
-**BibTeX:**
+| File | Role |
+| --- | --- |
+| `MainApp.py` | Three-tab entry point |
+| `arpes_physics.py` | Shared kernels: `.dat` loader, Shirley, Dynes photocurrent, MMWA, \(\mu\) correction, BCS interpolation |
+| `gui_common.py` | Shared Tkinter helpers |
+| `prl_plot_style.py` | Publication figure style (AIP RSI / APS) |
+| `step1_band_extraction.py` | Normal-state band extraction |
+| `step2_sc_gap_fitting.py` | Per-EDC fits, \(F\)-test, MMWA |
+| `step3_temperature_dependence.py` | \(\Delta(T)\), \(\Gamma(T)\), and BCS comparison |
+
+Symbols in `arpes_physics.py` match the manuscript: `xi_k`, `delta`, `gamma`,
+`delta_app`, `delta_corr`, `delta_best`.
+
+Exported text files keep a four-line header plus tab-separated columns
+`k`, `delta_fit`, `delta_err`, `gamma_fit`, `gamma_err`, `RSS_gap`, `RSS_met`,
+`p_vals`, `delta_point_valid`. Do not change that layout if you want Step 3
+to read existing results.
+
+## Citation
+
+If you use this code, please cite the accompanying RSI paper and this repository:
+
 ```bibtex
-@misc{arpes_suite_2026,
-  author = {Yang, Xinhao},
-  title = {},
-  year = {2026},
-  publisher = {GitHub},
-  journal = {GitHub Repository},
-  howpublished = {\url{[https://github.com/yxinh/ARPES-Superresolution-Bandgap-Fitting-Program](https://github.com/yxinh/ARPES-Superresolution-Bandgap-Fitting-Program)}}
+@misc{yang2026arpes_mmwa,
+  author       = {Yang, Xinhao},
+  title        = {ARPES Superconducting-Gap Extraction},
+  year         = {2026},
+  publisher    = {GitHub},
+  howpublished = {\url{https://github.com/yxinh/ARPES-Superresolution-Bandgap-Extraction-Program}}
 }
 ```
 
-## 📄 License
-This project is licensed under the MIT License.
+## License
 
-## ✉️ Contact
-For questions or collaborations, please open an Issue in this repository.
+MIT. See `LICENSE`.
