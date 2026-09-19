@@ -59,7 +59,7 @@ Each Step file can also be launched on its own for debugging
 | `MainApp.py` | Three-tab entry point |
 | `arpes_physics.py` | Shared kernels: `.dat` loader, Shirley, Dynes photocurrent, MMWA, \(\mu\) correction, BCS interpolation |
 | `gui_common.py` | Shared Tkinter helpers |
-| `prl_plot_style.py` | Publication figure style (AIP RSI / APS) |
+| `publication_style.py` | Publication figure style (AIP RSI / APS) |
 | `step1_band_extraction.py` | Normal-state band extraction |
 | `step2_sc_gap_fitting.py` | Per-EDC fits, \(F\)-test, MMWA |
 | `step3_temperature_dependence.py` | \(\Delta(T)\), \(\Gamma(T)\), and BCS comparison |

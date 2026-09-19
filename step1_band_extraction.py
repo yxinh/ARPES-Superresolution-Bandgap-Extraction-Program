@@ -23,7 +23,7 @@ from arpes_physics import (
     intensity_sigma,
 )
 from gui_common import bind_mousewheel, mousewheel_delta
-from prl_plot_style import (
+from publication_style import (
     apply_style, COLORS, SERIES, PRL_LINEWIDTH, PRL_LINEWIDTH_THICK,
     PRL_MARKERSIZE, PRL_LABEL_SIZE, PRL_TITLE_SIZE,
     gui_figsize, legend_kwargs, set_axis_labels, style_colorbar,

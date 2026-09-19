@@ -14,7 +14,7 @@ from arpes_physics import (
     apply_gap_correction,
     bcs_gap,
 )
-from prl_plot_style import (
+from publication_style import (
     SERIES, COLORS, PRL_MARKERSIZE_LARGE, PRL_DPI, PRL_LINEWIDTH,
     OVERFLOW_BAR_EDGE,
     step3_panel_figsize, step3_apply_panel_layout, step3_finalize_axes, step3_legend_kwargs, step3_save_panel,
@@ -1223,7 +1223,7 @@ class Step3TemperatureDependence(ttk.Frame):
         if not folder:
             return
         try:
-            from prl_plot_style import PRL_DOUBLE_COL, STEP3_PANEL_ASPECT
+            from publication_style import PRL_DOUBLE_COL, STEP3_PANEL_ASPECT
             T_arr = np.array([p['T'] for p in self.extracted_physics])
             T_max = np.max(T_arr)
             panel_h = PRL_DOUBLE_COL / 2 * STEP3_PANEL_ASPECT
